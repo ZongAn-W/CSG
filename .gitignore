@@ -35,9 +35,8 @@ Desktop.ini
 # Logs
 *.log
 
-# Raw datasets that are too large for a normal Git repository
-/dataset/**/*.nc
-/dataset/NOMAD/NOMAD/UVIS_ozone_column_retrieval_dataset_v1.txt
+# Local datasets
+/dataset/
 
 # Generated model, checkpoint, and experiment outputs
 /models/
