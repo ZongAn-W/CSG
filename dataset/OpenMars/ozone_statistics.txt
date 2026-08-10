@@ -1,0 +1,286 @@
+臭氧浓度统计分析报告
+生成时间: 2026-01-08 22:35:50
+数据文件夹: D:\desktop\Ozone2.zip\Ozone2\Ozone2\Ozone\Dataset\OpenMars
+分析文件数: 27
+
+================================================================================
+总体统计:
+================================================================================
+Mean of ozone concentrations: 5.150814
+Std of ozone concentrations: 1.048569
+Min mean: 3.193641
+Max mean: 7.684976
+
+================================================================================
+各文件详细统计:
+================================================================================
+
+[1] openmars_ozo_my27_ls100_my27_ls113.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 7.088781
+  Std: 11.894999
+  Min: 0.120037
+  Max: 90.680191
+
+[2] openmars_ozo_my27_ls114_my27_ls128.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.385393
+  Std: 8.331211
+  Min: 0.000010
+  Max: 113.150368
+
+[3] openmars_ozo_my27_ls128_my27_ls143.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.501461
+  Std: 7.264991
+  Min: 0.040100
+  Max: 64.286896
+
+[4] openmars_ozo_my27_ls143_my27_ls159.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 3.229731
+  Std: 4.203892
+  Min: 0.000000
+  Max: 42.308495
+
+[5] openmars_ozo_my27_ls159_my27_ls176.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 3.360305
+  Std: 3.915586
+  Min: 0.000008
+  Max: 30.327324
+
+[6] openmars_ozo_my27_ls176_my27_ls193.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 3.193641
+  Std: 3.700183
+  Min: 0.000010
+  Max: 27.368023
+
+[7] openmars_ozo_my27_ls17_my27_ls31.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.275082
+  Std: 6.037452
+  Min: 0.000010
+  Max: 37.630226
+
+[8] openmars_ozo_my27_ls193_my27_ls212.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 3.382641
+  Std: 4.130255
+  Min: 0.000002
+  Max: 20.032238
+
+[9] openmars_ozo_my27_ls212_my27_ls231.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.257828
+  Std: 5.966638
+  Min: 0.000010
+  Max: 23.150347
+
+[10] openmars_ozo_my27_ls231_my27_ls250.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.159281
+  Std: 7.704216
+  Min: 0.000000
+  Max: 27.300827
+
+[11] openmars_ozo_my27_ls251_my27_ls270.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.395168
+  Std: 8.264939
+  Min: 0.000000
+  Max: 34.655182
+
+[12] openmars_ozo_my27_ls270_my27_ls289.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.997914
+  Std: 7.426042
+  Min: 0.000000
+  Max: 26.155563
+
+[13] openmars_ozo_my27_ls289_my27_ls308.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.186778
+  Std: 7.780246
+  Min: 0.000001
+  Max: 28.136227
+
+[14] openmars_ozo_my27_ls2_my27_ls17.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.632514
+  Std: 7.428567
+  Min: 0.000010
+  Max: 35.056961
+
+[15] openmars_ozo_my27_ls308_my27_ls325.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.225091
+  Std: 7.891343
+  Min: 0.000010
+  Max: 27.500772
+
+[16] openmars_ozo_my27_ls31_my27_ls45.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.526746
+  Std: 4.928901
+  Min: 0.000010
+  Max: 34.795174
+
+[17] openmars_ozo_my27_ls325_my27_ls342.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.463870
+  Std: 8.216603
+  Min: 0.000010
+  Max: 33.763474
+
+[18] openmars_ozo_my27_ls342_my27_ls358.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 6.352332
+  Std: 8.950266
+  Min: 0.000002
+  Max: 35.875832
+
+[19] openmars_ozo_my27_ls358_my28_ls13.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.505192
+  Std: 7.056710
+  Min: 0.000001
+  Max: 38.167694
+
+[20] openmars_ozo_my27_ls45_my27_ls59.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.906829
+  Std: 4.644234
+  Min: 0.000010
+  Max: 47.043774
+
+[21] openmars_ozo_my27_ls59_my27_ls72.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.365184
+  Std: 6.429135
+  Min: 0.014924
+  Max: 59.567905
+
+[22] openmars_ozo_my27_ls72_my27_ls86.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 6.564323
+  Std: 9.676246
+  Min: 0.000010
+  Max: 66.389427
+
+[23] openmars_ozo_my27_ls86_my27_ls99.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 7.684976
+  Std: 12.715419
+  Min: 0.137632
+  Max: 90.506882
+
+[24] openmars_ozo_my28_ls13_my28_ls27.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.926466
+  Std: 5.395107
+  Min: 0.000008
+  Max: 37.129292
+
+[25] openmars_ozo_my28_ls27_my28_ls41.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 4.949265
+  Std: 4.548750
+  Min: 0.000010
+  Max: 32.519417
+
+[26] openmars_ozo_my28_ls41_my28_ls55.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.212208
+  Std: 5.251572
+  Min: 0.118057
+  Max: 52.227505
+
+[27] openmars_ozo_my28_ls55_my28_ls68.nc
+  Variable: o3col
+  Units: unknown
+  Dimensions: ['time', 'lat', 'lon']
+  Shape: (240, 36, 72)
+  Mean: 5.342968
+  Std: 5.876875
+  Min: 0.127741
+  Max: 59.939495

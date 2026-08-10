@@ -1,0 +1,48 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Coverage and build artifacts
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Raw datasets that are too large for a normal Git repository
+/dataset/**/*.nc
+/dataset/NOMAD/NOMAD/UVIS_ozone_column_retrieval_dataset_v1.txt
+
+# Generated model, checkpoint, and experiment outputs
+/models/
+/runs/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
