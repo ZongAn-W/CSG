@@ -118,6 +118,16 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
         )
         torch.testing.assert_close(features[0], expected, atol=1e-6, rtol=0.0)
 
+    def test_ls_harmonic_encoder_forward_casts_float64_features_for_linear_layers(self):
+        encoder = self.module.LsHarmonicEncoder(hidden_dim=8)
+        ls = torch.tensor([[0.0, 90.0, 180.0]], dtype=torch.float64)
+
+        encoded = encoder(ls)
+
+        self.assertEqual(encoded.shape, (1, 3, 8))
+        self.assertEqual(encoded.dtype, encoder.layers[0].weight.dtype)
+        self.assertTrue(torch.isfinite(encoded).all())
+
     def test_topography_encoder_scales_and_resizes_finite_features(self):
         encoder = self.module.TopographyEncoder(hidden_dim=8)
         topography = torch.tensor([[[[-10_000.0, 0.0], [5_000.0, 10_000.0]]]])
