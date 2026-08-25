@@ -337,11 +337,14 @@ class ConvLSTMLsTopographyJointGatedSimVP(nn.Module):
         self.window = window
         self.horizon = horizon
         self.spatial_hidden_dim = spatial_hidden_dim
-        self.gate_hidden_dim = gate_hidden_dim
-        self.initial_gate_strength = initial_gate_strength
         self.convlstm = ConvLSTMEncoder(in_channels, convlstm_hidden_dim)
         self.spatial_encoder = SpatialEncoder(
             convlstm_hidden_dim, spatial_hidden_dim
+        )
+        self.joint_gate = JointSpatiotemporalGate(
+            channels=spatial_hidden_dim,
+            hidden_dim=gate_hidden_dim,
+            initial_gate_strength=initial_gate_strength,
         )
         self.temporal_translator = TemporalTranslator(
             window,
@@ -353,21 +356,66 @@ class ConvLSTMLsTopographyJointGatedSimVP(nn.Module):
         )
         self.spatial_decoder = SpatialDecoder(spatial_hidden_dim)
 
-    def forward(self, x, ls, topography):
-        if x.ndim != 5:
+    def _validate_inputs(self, x, ls, topography):
+        if not isinstance(x, torch.Tensor) or x.ndim != 5:
             raise ValueError(
-                "Expected input shape [batch, window, channels, height, width]."
+                "x must have shape [batch, window, channels, height, width]."
             )
 
         batch, window, channels, height, width = x.shape
         if window != self.window:
             raise ValueError(
-                f"Expected window={self.window}, but received window={window}."
+                f"x window must be {self.window}, but received {window}."
             )
         if channels != self.in_channels:
             raise ValueError(
-                f"Expected {self.in_channels} input channels, but received {channels}."
+                f"x channels must be {self.in_channels}, but received {channels}."
             )
+        if ls is None or not isinstance(ls, torch.Tensor) or ls.ndim != 2:
+            raise ValueError("ls must be a tensor with shape [batch, window].")
+        if tuple(ls.shape) != (batch, self.window):
+            raise ValueError(
+                f"ls shape must be ({batch}, {self.window}), "
+                f"but received {tuple(ls.shape)}."
+            )
+        if not torch.is_floating_point(ls):
+            raise ValueError("ls dtype must be floating point.")
+        if ls.device != x.device:
+            raise ValueError(
+                f"x and ls device must match, but received {x.device} and {ls.device}."
+            )
+        if not torch.isfinite(ls).all():
+            raise ValueError("ls values must all be finite; NaN and Inf are invalid.")
+        if (
+            topography is None
+            or not isinstance(topography, torch.Tensor)
+            or topography.ndim != 4
+        ):
+            raise ValueError(
+                "topography must be a tensor with shape "
+                "[batch, 1, height, width]."
+            )
+        expected_topography_shape = (batch, 1, height, width)
+        if tuple(topography.shape) != expected_topography_shape:
+            raise ValueError(
+                f"topography shape must be {expected_topography_shape}, "
+                f"but received {tuple(topography.shape)}."
+            )
+        if not torch.is_floating_point(topography):
+            raise ValueError("topography dtype must be floating point.")
+        if topography.device != x.device:
+            raise ValueError(
+                "x and topography device must match, but received "
+                f"{x.device} and {topography.device}."
+            )
+        if not torch.isfinite(topography).all():
+            raise ValueError(
+                "topography values must all be finite; NaN and Inf are invalid."
+            )
+
+    def forward(self, x, ls, topography):
+        self._validate_inputs(x, ls, topography)
+        batch, window, _, height, width = x.shape
 
         recurrent_features = self.convlstm(x)
         encoded = self.spatial_encoder(
@@ -381,11 +429,20 @@ class ConvLSTMLsTopographyJointGatedSimVP(nn.Module):
         encoded_height, encoded_width = encoded.shape[-2:]
         encoded = encoded.reshape(
             batch,
-            window * self.spatial_hidden_dim,
+            window,
+            self.spatial_hidden_dim,
             encoded_height,
             encoded_width,
         )
-        translated = self.temporal_translator(encoded)
+        gated, _, _ = self.joint_gate(encoded, ls, topography)
+        translated = self.temporal_translator(
+            gated.reshape(
+                batch,
+                window * self.spatial_hidden_dim,
+                encoded_height,
+                encoded_width,
+            )
+        )
         translated = translated.reshape(
             batch * self.horizon,
             self.spatial_hidden_dim,

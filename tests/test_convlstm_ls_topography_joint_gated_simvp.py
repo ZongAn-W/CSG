@@ -221,6 +221,189 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
         self.assertFalse(torch.allclose(low_gate, high_gate))
         self.assertFalse(torch.allclose(low_ls_effect, high_ls_effect))
 
+    def test_matches_platform_dry_run_with_both_auxiliary_inputs(self):
+        model = self.module.build_model(
+            model_config(
+                in_channels=1,
+                selected_channels=[0],
+                window=3,
+                horizon=3,
+                height=8,
+                width=16,
+            )
+        ).eval()
+
+        with torch.no_grad():
+            outputs = model(
+                torch.randn(2, 3, 1, 8, 16),
+                torch.tensor([[0.0, 30.0, 60.0], [90.0, 120.0, 150.0]]),
+                torch.randn(2, 1, 8, 16) * 1_000.0,
+            )
+
+        self.assertEqual(outputs.shape, (2, 3, 1, 8, 16))
+
+    def test_forward_supports_primary_and_odd_multichannel_shapes(self):
+        primary = self.module.build_model(model_config()).eval()
+        with torch.no_grad():
+            primary_output = primary(
+                torch.randn(1, 20, 5, 8, 16),
+                torch.linspace(0.0, 190.0, 20).unsqueeze(0),
+                torch.linspace(-8_000.0, 16_000.0, 128).reshape(1, 1, 8, 16),
+            )
+        self.assertEqual(primary_output.shape, (1, 20, 1, 8, 16))
+
+        odd = self.module.build_model(
+            model_config(
+                in_channels=2,
+                selected_channels=[0, 1],
+                window=4,
+                horizon=2,
+                height=9,
+                width=15,
+                convlstm_hidden_dim=4,
+                spatial_hidden_dim=6,
+                temporal_hidden_dim=8,
+                num_temporal_blocks=1,
+                dropout=0.0,
+                gate_hidden_dim=8,
+            )
+        )
+        odd_output = odd(
+            torch.randn(1, 4, 2, 9, 15),
+            torch.tensor([[0.0, 30.0, 60.0, 90.0]]),
+            torch.randn(1, 1, 9, 15) * 1_000.0,
+        )
+        odd_output.square().mean().backward()
+
+        self.assertEqual(odd_output.shape, (1, 2, 1, 9, 15))
+        for name, parameter in odd.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+
+    def test_zero_strength_exactly_matches_baseline_with_shared_weights(self):
+        joint_config = model_config(
+            window=3,
+            horizon=2,
+            height=8,
+            width=16,
+            initial_gate_strength=0.0,
+        )
+        baseline_config = {
+            key: value
+            for key, value in joint_config.items()
+            if key not in {"gate_hidden_dim", "initial_gate_strength"}
+        }
+        baseline = self.baseline_module.build_model(baseline_config).eval()
+        joint = self.module.build_model(joint_config).eval()
+        joint_state = joint.state_dict()
+        for name, value in baseline.state_dict().items():
+            joint_state[name] = value
+        joint.load_state_dict(joint_state)
+
+        x = torch.randn(2, 3, 5, 8, 16)
+        ls = torch.tensor([[0.0, 30.0, 60.0], [90.0, 120.0, 150.0]])
+        topography = torch.randn(2, 1, 8, 16) * 2_000.0
+        with torch.no_grad():
+            expected = baseline(x)
+            actual = joint(x, ls, topography)
+
+        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+
+    def test_rejects_invalid_runtime_inputs(self):
+        model = self.module.build_model(model_config(window=3, horizon=2))
+        x = torch.randn(2, 3, 5, 8, 16)
+        valid_ls = torch.zeros(2, 3)
+        valid_topography = torch.zeros(2, 1, 8, 16)
+        cases = [
+            (
+                "x",
+                lambda: model(
+                    torch.randn(2, 3, 5, 8), valid_ls, valid_topography
+                ),
+            ),
+            (
+                "window",
+                lambda: model(
+                    torch.randn(2, 2, 5, 8, 16),
+                    valid_ls[:, :2],
+                    valid_topography,
+                ),
+            ),
+            (
+                "channels",
+                lambda: model(
+                    torch.randn(2, 3, 4, 8, 16), valid_ls, valid_topography
+                ),
+            ),
+            ("ls", lambda: model(x, None, valid_topography)),
+            ("ls", lambda: model(x, torch.zeros(2, 2), valid_topography)),
+            (
+                "ls",
+                lambda: model(
+                    x, torch.zeros(2, 3, dtype=torch.long), valid_topography
+                ),
+            ),
+            (
+                "ls",
+                lambda: model(
+                    x,
+                    torch.tensor([[0.0, 1.0, float("nan")]]).expand(2, -1),
+                    valid_topography,
+                ),
+            ),
+            (
+                "device",
+                lambda: model(
+                    x, torch.zeros(2, 3, device="meta"), valid_topography
+                ),
+            ),
+            ("topography", lambda: model(x, valid_ls, None)),
+            ("topography", lambda: model(x, valid_ls, torch.zeros(2, 8, 16))),
+            (
+                "topography",
+                lambda: model(x, valid_ls, torch.zeros(2, 2, 8, 16)),
+            ),
+            (
+                "topography",
+                lambda: model(x, valid_ls, torch.zeros(2, 1, 7, 16)),
+            ),
+            (
+                "topography",
+                lambda: model(
+                    x, valid_ls, torch.zeros(2, 1, 8, 16, dtype=torch.long)
+                ),
+            ),
+            (
+                "topography",
+                lambda: model(
+                    x, valid_ls, torch.full((2, 1, 8, 16), float("inf"))
+                ),
+            ),
+            (
+                "device",
+                lambda: model(
+                    x, valid_ls, torch.zeros(2, 1, 8, 16, device="meta")
+                ),
+            ),
+        ]
+
+        for label, call in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, label):
+                    call()
+
+    def test_rejects_invalid_gate_configuration(self):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            self.module.build_model(model_config(num_temporal_blocks=0))
+        with self.assertRaisesRegex(ValueError, "dropout"):
+            self.module.build_model(model_config(dropout=1.0))
+        with self.assertRaisesRegex(ValueError, "gate_hidden_dim"):
+            self.module.build_model(model_config(gate_hidden_dim=0))
+        with self.assertRaisesRegex(ValueError, "initial_gate_strength"):
+            self.module.build_model(model_config(initial_gate_strength=-0.01))
+        with self.assertRaisesRegex(ValueError, "initial_gate_strength"):
+            self.module.build_model(model_config(initial_gate_strength=1.01))
+
 
 if __name__ == "__main__":
     unittest.main()
