@@ -158,6 +158,23 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
         self.assertTrue(torch.all(gate_values <= 1.0))
         torch.testing.assert_close(gated, scales * encoded)
 
+    def test_joint_gate_scales_stay_within_initial_strength_and_backpropagates(self):
+        gate = self.module.JointSpatiotemporalGate(
+            channels=6, hidden_dim=8, initial_gate_strength=0.05
+        )
+        encoded = torch.randn(2, 3, 6, 4, 5)
+        ls = torch.tensor([[0.0, 90.0, 180.0], [45.0, 135.0, 225.0]])
+        topography = torch.randn(2, 1, 8, 10) * 1_000.0
+
+        gated, _, scales = gate(encoded, ls, topography)
+        self.assertGreaterEqual(scales.min().item(), 0.95 - 1e-6)
+        self.assertLessEqual(scales.max().item(), 1.05 + 1e-6)
+
+        gated.square().mean().backward()
+        for name, parameter in gate.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+
     def test_joint_gate_rejects_invalid_encoded_rank_and_channels(self):
         gate = self.module.JointSpatiotemporalGate(
             channels=3, hidden_dim=4, initial_gate_strength=0.25
