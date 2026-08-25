@@ -122,6 +122,60 @@ class TopographyEncoder(nn.Module):
         return encoded
 
 
+class JointSpatiotemporalGate(nn.Module):
+    def __init__(self, channels, hidden_dim, initial_gate_strength):
+        super().__init__()
+        self.channels = channels
+        self.hidden_dim = hidden_dim
+        self.feature_projection = nn.Conv2d(channels, hidden_dim, kernel_size=1)
+        self.ls_encoder = LsHarmonicEncoder(hidden_dim)
+        self.topography_encoder = TopographyEncoder(hidden_dim)
+        self.output_projection = nn.Conv2d(hidden_dim, channels, kernel_size=1)
+        self.gate_strength = nn.Parameter(torch.tensor(float(initial_gate_strength)))
+        nn.init.xavier_uniform_(self.output_projection.weight, gain=0.01)
+        nn.init.zeros_(self.output_projection.bias)
+
+    def current_strength(self):
+        bounded = self.gate_strength.clamp(0.0, 1.0)
+        return self.gate_strength + (bounded - self.gate_strength).detach()
+
+    def gate_values(self, encoded, ls, topography):
+        if not isinstance(encoded, torch.Tensor) or encoded.ndim != 5:
+            raise ValueError(
+                "encoded must be a rank-5 tensor [batch, window, channels, height, width]."
+            )
+        batch, window, channels, height, width = encoded.shape
+        if channels != self.channels:
+            raise ValueError(
+                f"encoded channels must be {self.channels}, but received {channels}."
+            )
+        if tuple(ls.shape) != (batch, window):
+            raise ValueError(
+                f"ls shape must be ({batch}, {window}), but received {tuple(ls.shape)}."
+            )
+
+        features = self.feature_projection(
+            encoded.reshape(batch * window, channels, height, width)
+        ).reshape(batch, window, self.hidden_dim, height, width)
+        ls_features = self.ls_encoder(ls).to(dtype=features.dtype).unsqueeze(-1).unsqueeze(-1)
+        terrain_features = self.topography_encoder(
+            topography, (height, width)
+        ).to(dtype=features.dtype).unsqueeze(1)
+        joint_features = torch.nn.functional.gelu(
+            features + ls_features + terrain_features
+        )
+        return torch.tanh(
+            self.output_projection(
+                joint_features.reshape(batch * window, self.hidden_dim, height, width)
+            ).reshape(batch, window, self.channels, height, width)
+        )
+
+    def forward(self, encoded, ls, topography):
+        gate = self.gate_values(encoded, ls, topography)
+        scales = 1.0 + self.current_strength() * gate
+        return scales * encoded, gate, scales
+
+
 class ConvLSTMCell(nn.Module):
     def __init__(self, in_channels, hidden_dim):
         super().__init__()

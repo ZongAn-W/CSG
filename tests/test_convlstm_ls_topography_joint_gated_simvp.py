@@ -141,6 +141,69 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
         self.assertEqual(encoded.shape, (1, 8, 2, 2))
         self.assertTrue(torch.isfinite(encoded).all())
 
+    def test_joint_gate_returns_encoded_scales_and_bounded_gate_values(self):
+        gate = self.module.JointSpatiotemporalGate(
+            channels=3, hidden_dim=4, initial_gate_strength=0.25
+        )
+        encoded = torch.randn(2, 5, 3, 4, 6)
+        ls = torch.linspace(0.0, 180.0, 5).repeat(2, 1)
+        topography = torch.randn(2, 1, 8, 12) * 1_000.0
+
+        gated, gate_values, scales = gate(encoded, ls, topography)
+
+        self.assertEqual(gated.shape, encoded.shape)
+        self.assertEqual(gate_values.shape, encoded.shape)
+        self.assertEqual(scales.shape, encoded.shape)
+        self.assertTrue(torch.all(gate_values >= -1.0))
+        self.assertTrue(torch.all(gate_values <= 1.0))
+        torch.testing.assert_close(gated, scales * encoded)
+
+    def test_joint_gate_rejects_invalid_encoded_rank_and_channels(self):
+        gate = self.module.JointSpatiotemporalGate(
+            channels=3, hidden_dim=4, initial_gate_strength=0.25
+        )
+        ls = torch.zeros(2, 5)
+        topography = torch.zeros(2, 1, 8, 12)
+
+        with self.assertRaisesRegex(ValueError, "rank-5"):
+            gate(torch.zeros(2, 3, 4, 6), ls, topography)
+        with self.assertRaisesRegex(ValueError, "channels"):
+            gate(torch.zeros(2, 5, 2, 4, 6), ls, topography)
+
+    def test_joint_gate_ls_effect_changes_with_topography(self):
+        gate = self.module.JointSpatiotemporalGate(
+            channels=1, hidden_dim=1, initial_gate_strength=1.0
+        )
+        with torch.no_grad():
+            gate.feature_projection.weight.zero_()
+            gate.feature_projection.bias.zero_()
+            gate.ls_encoder.layers[0].weight.zero_()
+            gate.ls_encoder.layers[0].bias.zero_()
+            gate.ls_encoder.layers[0].weight[0, 0] = 1.0
+            gate.ls_encoder.layers[2].weight.fill_(1.0)
+            gate.ls_encoder.layers[2].bias.zero_()
+            gate.topography_encoder.layers[0].weight.zero_()
+            gate.topography_encoder.layers[0].bias.zero_()
+            gate.topography_encoder.layers[0].weight[0, 0, 1, 1] = 1.0
+            gate.topography_encoder.layers[2].weight.zero_()
+            gate.topography_encoder.layers[2].bias.zero_()
+            gate.topography_encoder.layers[2].weight[0, 0, 1, 1] = 1.0
+            gate.output_projection.weight.fill_(1.0)
+            gate.output_projection.bias.zero_()
+
+        encoded = torch.ones(1, 2, 1, 4, 4)
+        ls = torch.tensor([[0.0, 90.0]])
+        low_terrain = torch.zeros(1, 1, 8, 8)
+        high_terrain = torch.full((1, 1, 8, 8), 10_000.0)
+
+        _, low_gate, _ = gate(encoded, ls, low_terrain)
+        _, high_gate, _ = gate(encoded, ls, high_terrain)
+        low_ls_effect = low_gate[:, 1] - low_gate[:, 0]
+        high_ls_effect = high_gate[:, 1] - high_gate[:, 0]
+
+        self.assertFalse(torch.allclose(low_gate, high_gate))
+        self.assertFalse(torch.allclose(low_ls_effect, high_ls_effect))
+
 
 if __name__ == "__main__":
     unittest.main()
