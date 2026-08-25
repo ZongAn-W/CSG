@@ -66,6 +66,62 @@ MODEL_SPEC = {
 }
 
 
+class LsHarmonicEncoder(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(4, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def build_harmonic_features(self, ls):
+        if not isinstance(ls, torch.Tensor) or ls.ndim != 2:
+            raise ValueError("ls must be a rank-2 tensor [batch, window].")
+        if not torch.is_floating_point(ls):
+            raise TypeError("ls must use a floating-point dtype.")
+
+        radians = torch.deg2rad(ls)
+        return torch.stack(
+            (
+                torch.sin(radians),
+                torch.cos(radians),
+                torch.sin(2 * radians),
+                torch.cos(2 * radians),
+            ),
+            dim=-1,
+        )
+
+    def forward(self, ls):
+        harmonics = self.build_harmonic_features(ls)
+        harmonics = harmonics.to(dtype=self.layers[0].weight.dtype)
+        return self.layers(harmonics)
+
+
+class TopographyEncoder(nn.Module):
+    ELEVATION_SCALE_METERS = 10000.0
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(1, hidden_dim, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+
+    def scale_elevation(self, topography):
+        return topography / self.ELEVATION_SCALE_METERS
+
+    def forward(self, topography, output_size):
+        encoded = self.layers(self.scale_elevation(topography))
+        if encoded.shape[-2:] != output_size:
+            encoded = torch.nn.functional.interpolate(
+                encoded, size=output_size, mode="bilinear", align_corners=False
+            )
+        return encoded
+
+
 class ConvLSTMCell(nn.Module):
     def __init__(self, in_channels, hidden_dim):
         super().__init__()

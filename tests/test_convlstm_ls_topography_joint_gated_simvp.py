@@ -3,6 +3,7 @@ import inspect
 from pathlib import Path
 import unittest
 
+import torch
 from torch import nn
 
 
@@ -99,6 +100,36 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
 
     def test_build_model_returns_module(self):
         self.assertIsInstance(self.module.build_model(model_config()), nn.Module)
+
+    def test_ls_harmonic_encoder_builds_expected_harmonic_features(self):
+        encoder = self.module.LsHarmonicEncoder(hidden_dim=8)
+
+        features = encoder.build_harmonic_features(
+            torch.tensor([[0.0, 90.0, 180.0, 270.0]])
+        )
+
+        expected = torch.tensor(
+            [
+                [0.0, 1.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, -1.0],
+                [0.0, -1.0, 0.0, 1.0],
+                [-1.0, 0.0, 0.0, -1.0],
+            ]
+        )
+        torch.testing.assert_close(features[0], expected, atol=1e-6, rtol=0.0)
+
+    def test_topography_encoder_scales_and_resizes_finite_features(self):
+        encoder = self.module.TopographyEncoder(hidden_dim=8)
+        topography = torch.tensor([[[[-10_000.0, 0.0], [5_000.0, 10_000.0]]]])
+
+        scaled = encoder.scale_elevation(topography)
+        encoded = encoder(topography, output_size=(2, 2))
+
+        torch.testing.assert_close(
+            scaled, torch.tensor([[[[-1.0, 0.0], [0.5, 1.0]]]])
+        )
+        self.assertEqual(encoded.shape, (1, 8, 2, 2))
+        self.assertTrue(torch.isfinite(encoded).all())
 
 
 if __name__ == "__main__":
