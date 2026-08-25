@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import inspect
 from pathlib import Path
@@ -17,6 +18,22 @@ def load_module(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def class_ast(module_path, class_name):
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return ast.dump(node, include_attributes=False)
+    raise AssertionError(f"missing class {class_name} in {module_path}")
+
+
+def trainable_parameter_count(model):
+    return sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
 
 
 def model_config(**overrides):
@@ -403,6 +420,67 @@ class ConvLSTMLsTopographyJointGatedSimVPTests(unittest.TestCase):
             self.module.build_model(model_config(initial_gate_strength=-0.01))
         with self.assertRaisesRegex(ValueError, "initial_gate_strength"):
             self.module.build_model(model_config(initial_gate_strength=1.01))
+
+    def test_main_path_classes_are_ast_identical_to_baseline(self):
+        class_names = (
+            "ConvLSTMCell",
+            "ConvLSTMEncoder",
+            "SpatialEncoder",
+            "TemporalInceptionBlock",
+            "TemporalTranslator",
+            "SpatialDecoder",
+        )
+        for class_name in class_names:
+            with self.subTest(class_name=class_name):
+                self.assertEqual(
+                    class_ast(MODEL_PATH, class_name),
+                    class_ast(BASELINE_MODEL_PATH, class_name),
+                )
+
+    def test_uses_only_upload_safe_imports_and_calls(self):
+        tree = ast.parse(MODEL_PATH.read_text(encoding="utf-8"))
+        import_roots = set()
+        called_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                import_roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                import_roots.add(node.module.split(".")[0])
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    called_names.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    called_names.add(node.func.attr)
+
+        banned_calls = {
+            "open",
+            "eval",
+            "exec",
+            "compile",
+            "__import__",
+            "system",
+            "popen",
+            "Popen",
+            "run",
+        }
+        self.assertLessEqual(import_roots, {"torch"})
+        self.assertFalse(called_names & banned_calls)
+
+    def test_primary_configuration_parameter_overhead_is_below_fifteen_percent(self):
+        joint_config = model_config()
+        baseline_config = {
+            key: value
+            for key, value in joint_config.items()
+            if key not in {"gate_hidden_dim", "initial_gate_strength"}
+        }
+        joint = self.module.build_model(joint_config)
+        baseline = self.baseline_module.build_model(baseline_config)
+        baseline_parameters = trainable_parameter_count(baseline)
+        overhead = (
+            trainable_parameter_count(joint) - baseline_parameters
+        ) / baseline_parameters
+
+        self.assertLess(overhead, 0.15)
 
 
 if __name__ == "__main__":
