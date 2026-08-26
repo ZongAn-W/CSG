@@ -315,6 +315,38 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         for name, parameter in operator.named_parameters():
             self.assertIsNotNone(parameter.grad, name)
 
+    def test_steo_streams_neighbor_messages_without_stacking_differences(self):
+        source = inspect.getsource(self.module.STEO.forward)
+        self.assertNotIn("torch.stack", source)
+
+    def test_training_graph_stays_within_saved_tensor_budget(self):
+        model = self.module.build_model(
+            model_config(
+                window=3,
+                horizon=2,
+                height=8,
+                width=16,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+                dropout=0.0,
+            )
+        ).train()
+        x = torch.randn(2, 3, 5, 8, 16)
+        ls = torch.randn(2, 3)
+        topography = torch.randn(2, 1, 8, 16)
+        saved_elements = []
+
+        def pack(tensor):
+            saved_elements.append(tensor.numel())
+            return tensor
+
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+            output = model(x, ls, topography)
+        self.assertLess(sum(saved_elements), 600_000)
+        output.square().mean().backward()
+
     def test_primary_model_forecasts_twenty_full_resolution_frames(self):
         model = self.module.build_model(model_config()).eval()
         x = torch.randn(1, 20, 5, 36, 72)

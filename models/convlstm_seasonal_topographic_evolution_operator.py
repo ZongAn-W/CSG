@@ -1,4 +1,5 @@
 import torch
+import torch.utils.checkpoint
 from torch import nn
 
 
@@ -420,19 +421,51 @@ class SeasonalTerrainWeights(nn.Module):
 
         if self.season_projection is not None:
             season = self.season_projection(season_harmonics)
-            season = season[:, None, :, None, None]
+        projection = self.output_projection.weight
         if self.mode == "terrain_only":
-            joint = encoded_edges
+            logits = torch.einsum(
+                "bndhw,od->bnohw",
+                encoded_edges,
+                projection,
+            )
         elif self.mode == "ls_only":
-            joint = self.neighbor_embedding * season
-            joint = joint.expand(batch, -1, -1, height, width)
+            neighbor = self.neighbor_embedding[0, :, :, 0, 0]
+            logits = torch.einsum(
+                "nd,bd,od->bno",
+                neighbor,
+                season,
+                projection,
+            )
+            logits = logits[:, :, :, None, None].expand(
+                -1,
+                -1,
+                -1,
+                height,
+                width,
+            )
         elif self.mode == "separable":
-            joint = encoded_edges + self.neighbor_embedding * season
+            terrain_logits = torch.einsum(
+                "bndhw,od->bnohw",
+                encoded_edges,
+                projection,
+            )
+            neighbor = self.neighbor_embedding[0, :, :, 0, 0]
+            seasonal_logits = torch.einsum(
+                "nd,bd,od->bno",
+                neighbor,
+                season,
+                projection,
+            )
+            logits = terrain_logits + seasonal_logits[:, :, :, None, None]
         else:
-            joint = encoded_edges * season
+            logits = torch.einsum(
+                "bndhw,bd,od->bnohw",
+                encoded_edges,
+                season,
+                projection,
+            )
 
-        logits = self.output_projection(joint.permute(0, 1, 3, 4, 2))
-        logits = logits.permute(0, 1, 4, 2, 3) + self.direction_scale_bias
+        logits = logits + self.direction_scale_bias
         return torch.softmax(logits, dim=1)
 
 
@@ -471,20 +504,34 @@ class HistoryEncoder(nn.Module):
         )
         self.cell = SphericalConvLSTMCell(hidden_dim, hidden_dim)
 
+    def _step(self, frame, hidden, cell):
+        batch, channels, height, width = frame.shape
+        ozone = self.ozone_stem(frame[:, 0:1])
+        # Upload validation runs an ozone-only dry pass before channel selection.
+        if channels == 1:
+            forcing_input = frame.new_zeros(batch, 4, height, width)
+        else:
+            forcing_input = frame[:, 1:5]
+        forcing = self.forcing_stem(forcing_input)
+        fused = self.fusion(torch.cat((ozone, forcing), dim=1))
+        return self.cell(fused, hidden, cell)
+
     def forward(self, x):
         batch, steps, _, height, width = x.shape
         hidden = x.new_zeros(batch, self.cell.hidden_dim, height, width)
         cell = x.new_zeros(batch, self.cell.hidden_dim, height, width)
+        use_checkpoint = self.training and torch.is_grad_enabled()
         for step in range(steps):
-            ozone = self.ozone_stem(x[:, step, 0:1])
-            # Upload validation runs an ozone-only dry pass before channel selection.
-            if x.shape[2] == 1:
-                forcing_input = x.new_zeros(batch, 4, height, width)
+            if use_checkpoint:
+                hidden, cell = torch.utils.checkpoint.checkpoint(
+                    self._step,
+                    x[:, step],
+                    hidden,
+                    cell,
+                    use_reentrant=False,
+                )
             else:
-                forcing_input = x[:, step, 1:5]
-            forcing = self.forcing_stem(forcing_input)
-            fused = self.fusion(torch.cat((ozone, forcing), dim=1))
-            hidden, cell = self.cell(fused, hidden, cell)
+                hidden, cell = self._step(x[:, step], hidden, cell)
         return hidden, cell
 
 
@@ -531,13 +578,12 @@ class STEO(nn.Module):
             height,
             width,
         )
-        differences = []
-        for dy, dx, _, _, _ in self.offsets:
-            neighbor = self.grid.neighbor(projected, dy, dx)
-            differences.append(neighbor - projected)
-        differences = torch.stack(differences, dim=1)
         weights = self.weight_network(encoded_edges, season_harmonics)
-        message = (differences * weights.unsqueeze(3)).sum(dim=1)
+        message = torch.zeros_like(projected)
+        for neighbor_index, (dy, dx, _, _, _) in enumerate(self.offsets):
+            neighbor = self.grid.neighbor(projected, dy, dx)
+            neighbor_weight = weights[:, neighbor_index].unsqueeze(2)
+            message = message + (neighbor - projected) * neighbor_weight
         message = message.reshape(batch, self.hidden_dim, height, width)
         return self.merge(message), weights
 
@@ -785,15 +831,52 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
         last_ozone = x[:, -1, 0:1]
         outputs = []
         diagnostic_weights = []
+        use_checkpoint = (
+            self.training
+            and torch.is_grad_enabled()
+            and not return_diagnostics
+        )
         for lead in range(self.horizon):
             block_weights = []
             for block, block_edges in zip(self.blocks, encoded_edges):
-                state, weights = block(
-                    state,
-                    history_context,
-                    block_edges,
-                    harmonics[:, lead],
-                )
+                if use_checkpoint:
+                    checkpoint_edges = (
+                        block_edges
+                        if block_edges is not None
+                        else state.new_empty(0)
+                    )
+
+                    def evolve(
+                        current_state,
+                        context,
+                        edge_features,
+                        seasonal_context,
+                        current_block=block,
+                    ):
+                        next_state, _ = current_block(
+                            current_state,
+                            context,
+                            edge_features,
+                            seasonal_context,
+                        )
+                        return next_state
+
+                    state = torch.utils.checkpoint.checkpoint(
+                        evolve,
+                        state,
+                        history_context,
+                        checkpoint_edges,
+                        harmonics[:, lead],
+                        use_reentrant=False,
+                    )
+                    weights = None
+                else:
+                    state, weights = block(
+                        state,
+                        history_context,
+                        block_edges,
+                        harmonics[:, lead],
+                    )
                 if return_diagnostics and weights is None:
                     raise ValueError(
                         "operator diagnostics are unavailable for "
