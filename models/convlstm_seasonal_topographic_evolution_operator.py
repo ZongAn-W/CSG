@@ -73,6 +73,85 @@ def _dropout(config):
     return float(value)
 
 
+class SphericalGrid(nn.Module):
+    MARS_RADIUS_METERS = 3_389_500.0
+
+    def neighbor(self, x, dy, dx):
+        height, width = x.shape[-2:]
+        if width % 2 != 0:
+            raise ValueError("spherical longitude width must be even.")
+        if abs(dy) >= height:
+            raise ValueError("latitude offset magnitude must be less than height.")
+
+        rows = torch.arange(height, device=x.device).reshape(height, 1) + dy
+        crossed_north = rows < 0
+        crossed_south = rows >= height
+        reflected_rows = torch.where(crossed_north, -rows - 1, rows)
+        reflected_rows = torch.where(
+            crossed_south,
+            2 * height - reflected_rows - 1,
+            reflected_rows,
+        )
+        crossed = crossed_north | crossed_south
+        columns = torch.arange(width, device=x.device).reshape(1, width) + dx
+        columns = columns + crossed.to(columns.dtype) * (width // 2)
+        columns = columns.remainder(width)
+        row_index = reflected_rows.expand(height, width)
+        column_index = columns.expand(height, width)
+        return x[..., row_index, column_index]
+
+    def latitudes(self, height, device, dtype=torch.float32):
+        rows = torch.arange(height, device=device, dtype=dtype)
+        return torch.pi / 2 - (rows + 0.5) * torch.pi / height
+
+    def distance_map(
+        self,
+        height,
+        width,
+        dy,
+        dx,
+        device,
+        dtype=torch.float32,
+    ):
+        latitudes = self.latitudes(height, device, dtype).reshape(
+            1, 1, height, 1
+        )
+        delta_latitude = torch.pi / height
+        delta_longitude = 2 * torch.pi / width
+        north_south = abs(dy) * delta_latitude
+        east_west = abs(dx) * delta_longitude * torch.cos(latitudes).abs()
+        angular = torch.sqrt(north_south**2 + east_west**2)
+        return angular.expand(1, 1, height, width)
+
+
+class SphericalConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, bias=True):
+        super().__init__()
+        if kernel_size % 2 != 1:
+            raise ValueError("kernel_size must be odd.")
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.grid = SphericalGrid()
+        self.weight = nn.Parameter(
+            torch.empty(out_channels, in_channels, kernel_size * kernel_size)
+        )
+        self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
+        nn.init.kaiming_uniform_(self.weight, a=5**0.5)
+
+    def forward(self, x):
+        radius = self.kernel_size // 2
+        patches = []
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                patches.append(self.grid.neighbor(x, dy, dx))
+        stacked = torch.stack(patches, dim=2)
+        output = torch.einsum("bckhw,ock->bohw", stacked, self.weight)
+        if self.bias is not None:
+            output = output + self.bias.reshape(1, -1, 1, 1)
+        return output
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,
