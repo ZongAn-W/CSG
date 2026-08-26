@@ -307,6 +307,67 @@ class TerrainEdgeBuilder(nn.Module):
         return torch.stack(edges, dim=1)
 
 
+class FutureLsEncoder(nn.Module):
+    def future_angles(self, ls, horizon):
+        theta = torch.deg2rad(ls)
+        differences = theta[:, 1:] - theta[:, :-1]
+        wrapped = torch.atan2(torch.sin(differences), torch.cos(differences))
+        recent = wrapped[:, -min(4, wrapped.shape[1]) :]
+        angular_step = torch.atan2(
+            torch.sin(recent).mean(dim=1),
+            torch.cos(recent).mean(dim=1),
+        )
+        leads = torch.arange(
+            1,
+            horizon + 1,
+            device=ls.device,
+            dtype=ls.dtype,
+        ).reshape(1, horizon)
+        return torch.remainder(
+            theta[:, -1:] + angular_step[:, None] * leads,
+            2 * torch.pi,
+        )
+
+    def harmonics(self, angles):
+        values = []
+        for order in range(1, 5):
+            values.extend(
+                (
+                    torch.sin(order * angles),
+                    torch.cos(order * angles),
+                )
+            )
+        return torch.stack(values, dim=-1)
+
+    def forward(self, ls, horizon):
+        return self.harmonics(self.future_angles(ls, horizon))
+
+
+class SeasonalTerrainWeights(nn.Module):
+    NEIGHBOR_COUNT = 24
+
+    def __init__(self, edge_dim, terrain_hidden_dim, heads):
+        super().__init__()
+        self.heads = heads
+        self.edge_projection = nn.Linear(edge_dim, terrain_hidden_dim)
+        self.season_projection = nn.Linear(8, terrain_hidden_dim)
+        self.output_projection = nn.Linear(terrain_hidden_dim, heads, bias=False)
+        self.direction_scale_bias = nn.Parameter(
+            torch.zeros(1, self.NEIGHBOR_COUNT, heads, 1, 1)
+        )
+
+    def encode_edges(self, edges):
+        encoded = self.edge_projection(edges.permute(0, 1, 3, 4, 2))
+        return encoded.permute(0, 1, 4, 2, 3)
+
+    def forward(self, encoded_edges, season_harmonics):
+        season = self.season_projection(season_harmonics)
+        joint = encoded_edges * season[:, None, :, None, None]
+        logits = self.output_projection(joint.permute(0, 1, 3, 4, 2))
+        logits = logits.permute(0, 1, 4, 2, 3) + self.direction_scale_bias
+        return torch.softmax(logits, dim=1)
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,

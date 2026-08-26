@@ -150,6 +150,63 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         self.assertEqual(edges.shape[-2:], (8, 16))
         self.assertEqual(edges.shape[2], builder.edge_dim)
 
+    def test_future_ls_continues_across_degree_wrap(self):
+        encoder = self.module.FutureLsEncoder()
+        ls = torch.tensor([[358.0, 359.0, 0.0, 1.0]])
+        angles = encoder.future_angles(ls, horizon=3)
+        expected = torch.deg2rad(torch.tensor([[2.0, 3.0, 4.0]]))
+        torch.testing.assert_close(angles, expected, atol=1e-5, rtol=0.0)
+
+    def test_future_ls_harmonics_have_four_orders(self):
+        encoder = self.module.FutureLsEncoder()
+        harmonics = encoder.harmonics(torch.tensor([[0.0, torch.pi / 2]]))
+        self.assertEqual(harmonics.shape, (1, 2, 8))
+        torch.testing.assert_close(
+            harmonics[0, 0],
+            torch.tensor([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
+            atol=1e-6,
+            rtol=0.0,
+        )
+
+    def test_bilinear_weights_normalize_over_neighbors_and_backpropagate(self):
+        module = self.module.SeasonalTerrainWeights(
+            edge_dim=43,
+            terrain_hidden_dim=8,
+            heads=4,
+        )
+        edges = torch.randn(2, 24, 43, 8, 16)
+        season = torch.randn(2, 8)
+        encoded_edges = module.encode_edges(edges)
+        weights = module(encoded_edges, season)
+        self.assertEqual(weights.shape, (2, 24, 4, 8, 16))
+        torch.testing.assert_close(
+            weights.sum(dim=1),
+            torch.ones(2, 4, 8, 16),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        (weights.square().mean() + encoded_edges.square().mean()).backward()
+        for name, parameter in module.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+
+    def test_bilinear_terrain_response_changes_with_season(self):
+        module = self.module.SeasonalTerrainWeights(
+            edge_dim=43,
+            terrain_hidden_dim=8,
+            heads=2,
+        )
+        edges = torch.randn(1, 24, 43, 4, 8)
+        encoded_edges = module.encode_edges(edges)
+        season_a = torch.tensor(
+            [[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]]
+        )
+        season_b = torch.tensor(
+            [[1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 1.0]]
+        )
+        weights_a = module(encoded_edges, season_a)
+        weights_b = module(encoded_edges, season_b)
+        self.assertGreater((weights_a - weights_b).abs().max().item(), 1e-7)
+
 
 if __name__ == "__main__":
     unittest.main()
