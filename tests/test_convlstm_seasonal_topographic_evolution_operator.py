@@ -287,6 +287,62 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         for name, parameter in operator.named_parameters():
             self.assertIsNotNone(parameter.grad, name)
 
+    def test_primary_model_forecasts_twenty_full_resolution_frames(self):
+        model = self.module.build_model(model_config()).eval()
+        x = torch.randn(1, 20, 5, 36, 72)
+        ls = torch.linspace(350.0, 369.0, 20).remainder(360.0).unsqueeze(0)
+        topography = torch.randn(1, 1, 36, 72) * 2000.0
+        with torch.no_grad():
+            output = model(x, ls, topography)
+        self.assertEqual(output.shape, (1, 20, 1, 36, 72))
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_platform_dry_run_shape_and_finite_backward(self):
+        model = self.module.build_model(
+            model_config(
+                window=3,
+                horizon=2,
+                height=8,
+                width=16,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+                dropout=0.0,
+            )
+        )
+        x = torch.randn(2, 3, 5, 8, 16)
+        ls = torch.tensor([[358.0, 359.0, 0.0], [45.0, 46.0, 47.0]])
+        topography = torch.randn(2, 1, 8, 16) * 1000.0
+        output = model(x, ls, topography)
+        output.square().mean().backward()
+        self.assertEqual(output.shape, (2, 2, 1, 8, 16))
+        for name, parameter in model.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+
+    def test_diagnostics_expose_lead_block_neighbor_head_weights(self):
+        model = self.module.build_model(
+            model_config(
+                window=3,
+                horizon=2,
+                height=8,
+                width=16,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+                dropout=0.0,
+            )
+        ).eval()
+        x = torch.randn(1, 3, 5, 8, 16)
+        ls = torch.tensor([[10.0, 11.0, 12.0]])
+        topography = torch.randn(1, 1, 8, 16) * 1000.0
+        with torch.no_grad():
+            output, weights = model.forward_with_diagnostics(x, ls, topography)
+        self.assertEqual(output.shape, (1, 2, 1, 8, 16))
+        self.assertEqual(weights.shape, (1, 2, 1, 24, 2, 8, 16))
+
 
 if __name__ == "__main__":
     unittest.main()

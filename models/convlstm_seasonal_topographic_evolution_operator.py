@@ -461,6 +461,80 @@ class STEO(nn.Module):
         return self.merge(message), weights
 
 
+class PointwiseDynamics(nn.Module):
+    def __init__(self, hidden_dim, terrain_hidden_dim, dropout):
+        super().__init__()
+        self.season_projection = nn.Linear(8, terrain_hidden_dim)
+        self.layers = nn.Sequential(
+            nn.Conv2d(
+                2 * hidden_dim + terrain_hidden_dim,
+                2 * hidden_dim,
+                1,
+            ),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(2 * hidden_dim, hidden_dim, 1),
+        )
+
+    def forward(self, state, history_context, season_harmonics):
+        season = self.season_projection(season_harmonics)
+        season = season.unsqueeze(-1).unsqueeze(-1)
+        season = season.expand(
+            -1,
+            -1,
+            state.shape[-2],
+            state.shape[-1],
+        )
+        return self.layers(
+            torch.cat((state, history_context, season), dim=1)
+        )
+
+
+class STEOEvolutionBlock(nn.Module):
+    def __init__(
+        self,
+        hidden_dim,
+        edge_dim,
+        terrain_hidden_dim,
+        heads,
+        dropout,
+    ):
+        super().__init__()
+        self.norm = nn.GroupNorm(1, hidden_dim)
+        self.operator = STEO(
+            hidden_dim,
+            edge_dim,
+            terrain_hidden_dim,
+            heads,
+        )
+        self.pointwise = PointwiseDynamics(
+            hidden_dim,
+            terrain_hidden_dim,
+            dropout,
+        )
+        self.step_projection = nn.Conv2d(hidden_dim, hidden_dim, 1)
+
+    def forward(
+        self,
+        state,
+        history_context,
+        encoded_edges,
+        season_harmonics,
+    ):
+        normalized = self.norm(state)
+        spatial, weights = self.operator(
+            normalized,
+            encoded_edges,
+            season_harmonics,
+        )
+        local = self.pointwise(
+            normalized,
+            history_context,
+            season_harmonics,
+        )
+        return state + self.step_projection(spatial + local), weights
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,
@@ -478,14 +552,64 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
         self.window = window
         self.horizon = horizon
         self.history_hidden_dim = history_hidden_dim
-        self.terrain_hidden_dim = terrain_hidden_dim
-        self.operator_heads = operator_heads
-        self.evolution_blocks = evolution_blocks
-        self.dropout = dropout
+        self.terrain_bank = TerrainGeometryBank()
+        self.edge_builder = TerrainEdgeBuilder()
+        self.history_encoder = HistoryEncoder(history_hidden_dim)
+        self.ls_encoder = FutureLsEncoder()
+        self.blocks = nn.ModuleList(
+            [
+                STEOEvolutionBlock(
+                    hidden_dim=history_hidden_dim,
+                    edge_dim=self.edge_builder.edge_dim,
+                    terrain_hidden_dim=terrain_hidden_dim,
+                    heads=operator_heads,
+                    dropout=dropout,
+                )
+                for _ in range(evolution_blocks)
+            ]
+        )
+        self.output_head = nn.Sequential(
+            nn.GroupNorm(1, history_hidden_dim),
+            nn.Conv2d(history_hidden_dim, history_hidden_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(history_hidden_dim, 1, 1),
+        )
+
+    def _forecast(self, x, ls, topography, return_diagnostics):
+        state, history_context = self.history_encoder(x)
+        geometry = self.terrain_bank(topography)
+        edges = self.edge_builder(geometry)
+        harmonics = self.ls_encoder(ls, self.horizon).to(state.dtype)
+        encoded_edges = [
+            block.operator.encode_edges(edges) for block in self.blocks
+        ]
+        last_ozone = x[:, -1, 0:1]
+        outputs = []
+        diagnostic_weights = []
+        for lead in range(self.horizon):
+            block_weights = []
+            for block, block_edges in zip(self.blocks, encoded_edges):
+                state, weights = block(
+                    state,
+                    history_context,
+                    block_edges,
+                    harmonics[:, lead],
+                )
+                block_weights.append(weights)
+            outputs.append(last_ozone + self.output_head(state))
+            if return_diagnostics:
+                diagnostic_weights.append(torch.stack(block_weights, dim=1))
+        output = torch.stack(outputs, dim=1)
+        if not return_diagnostics:
+            return output
+        weights = torch.stack(diagnostic_weights, dim=1)
+        return output, weights
 
     def forward(self, x, ls, topography):
-        last_ozone = x[:, -1:, 0:1]
-        return last_ozone.expand(-1, self.horizon, -1, -1, -1).clone()
+        return self._forecast(x, ls, topography, return_diagnostics=False)
+
+    def forward_with_diagnostics(self, x, ls, topography):
+        return self._forecast(x, ls, topography, return_diagnostics=True)
 
 
 def build_model(config):
