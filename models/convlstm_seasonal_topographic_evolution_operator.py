@@ -368,6 +368,53 @@ class SeasonalTerrainWeights(nn.Module):
         return torch.softmax(logits, dim=1)
 
 
+class SphericalConvLSTMCell(nn.Module):
+    def __init__(self, in_channels, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.gates = SphericalConv2d(
+            in_channels + hidden_dim,
+            4 * hidden_dim,
+            3,
+        )
+
+    def forward(self, x, hidden, cell):
+        input_gate, forget_gate, output_gate, candidate = self.gates(
+            torch.cat((x, hidden), dim=1)
+        ).chunk(4, dim=1)
+        cell = (
+            torch.sigmoid(forget_gate) * cell
+            + torch.sigmoid(input_gate) * torch.tanh(candidate)
+        )
+        hidden = torch.sigmoid(output_gate) * torch.tanh(cell)
+        return hidden, cell
+
+
+class HistoryEncoder(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        stem_dim = hidden_dim // 2
+        self.ozone_stem = SphericalConv2d(1, stem_dim, 3)
+        self.forcing_stem = SphericalConv2d(4, stem_dim, 3)
+        self.fusion = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(2 * stem_dim, hidden_dim, kernel_size=1),
+            nn.GELU(),
+        )
+        self.cell = SphericalConvLSTMCell(hidden_dim, hidden_dim)
+
+    def forward(self, x):
+        batch, steps, _, height, width = x.shape
+        hidden = x.new_zeros(batch, self.cell.hidden_dim, height, width)
+        cell = x.new_zeros(batch, self.cell.hidden_dim, height, width)
+        for step in range(steps):
+            ozone = self.ozone_stem(x[:, step, 0:1])
+            forcing = self.forcing_stem(x[:, step, 1:5])
+            fused = self.fusion(torch.cat((ozone, forcing), dim=1))
+            hidden, cell = self.cell(fused, hidden, cell)
+        return hidden, cell
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,

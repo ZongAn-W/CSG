@@ -207,6 +207,29 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         weights_b = module(encoded_edges, season_b)
         self.assertGreater((weights_a - weights_b).abs().max().item(), 1e-7)
 
+    def test_history_encoder_preserves_full_resolution(self):
+        encoder = self.module.HistoryEncoder(hidden_dim=16)
+        inputs = torch.randn(2, 4, 5, 9, 16)
+        hidden, context = encoder(inputs)
+        self.assertEqual(hidden.shape, (2, 16, 9, 16))
+        self.assertEqual(context.shape, hidden.shape)
+
+    def test_history_encoder_has_separate_ozone_and_forcing_stems(self):
+        encoder = self.module.HistoryEncoder(hidden_dim=16)
+        self.assertEqual(encoder.ozone_stem.in_channels, 1)
+        self.assertEqual(encoder.forcing_stem.in_channels, 4)
+
+    def test_history_encoder_all_input_channels_receive_gradients(self):
+        encoder = self.module.HistoryEncoder(hidden_dim=16)
+        inputs = torch.randn(2, 3, 5, 8, 16, requires_grad=True)
+        hidden, context = encoder(inputs)
+        (hidden.square().mean() + context.square().mean()).backward()
+        for channel in range(5):
+            self.assertGreater(
+                inputs.grad[:, :, channel].abs().sum().item(),
+                0.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
