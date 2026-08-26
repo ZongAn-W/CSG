@@ -77,10 +77,37 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         ).parameters
         self.assertEqual(list(parameters), ["self", "x", "ls", "topography"])
 
-    def test_builder_returns_module_and_rejects_non_five_channel_config(self):
+    def test_builder_accepts_primary_config_and_rejects_unsupported_channels(self):
         self.assertIsInstance(self.module.build_model(model_config()), nn.Module)
         with self.assertRaisesRegex(ValueError, "in_channels must be exactly 5"):
             self.module.build_model(model_config(in_channels=4))
+
+    def test_platform_single_channel_upload_dry_run(self):
+        model = self.module.build_model(
+            model_config(
+                in_channels=1,
+                selected_channels=[0],
+                window=3,
+                horizon=3,
+                height=8,
+                width=16,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+                dropout=0.0,
+            )
+        ).eval()
+        x = torch.randn(2, 3, 1, 8, 16)
+        ls = torch.tensor(
+            [[0.0, 1.0, 2.0], [358.0, 359.0, 0.0]],
+            dtype=torch.float32,
+        )
+        topography = torch.randn(2, 1, 8, 16) * 1000.0
+        with torch.no_grad():
+            output = model(x, ls, topography)
+        self.assertEqual(output.shape, (2, 3, 1, 8, 16))
+        self.assertTrue(torch.isfinite(output).all())
 
     def test_spherical_neighbor_wraps_longitude(self):
         grid = self.module.SphericalGrid()

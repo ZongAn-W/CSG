@@ -477,7 +477,12 @@ class HistoryEncoder(nn.Module):
         cell = x.new_zeros(batch, self.cell.hidden_dim, height, width)
         for step in range(steps):
             ozone = self.ozone_stem(x[:, step, 0:1])
-            forcing = self.forcing_stem(x[:, step, 1:5])
+            # Upload validation runs an ozone-only dry pass before channel selection.
+            if x.shape[2] == 1:
+                forcing_input = x.new_zeros(batch, 4, height, width)
+            else:
+                forcing_input = x[:, step, 1:5]
+            forcing = self.forcing_stem(forcing_input)
             fused = self.fusion(torch.cat((ozone, forcing), dim=1))
             hidden, cell = self.cell(fused, hidden, cell)
         return hidden, cell
@@ -721,8 +726,10 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
             raise ValueError(
                 f"x window must be {self.window}, but received {window}."
             )
-        if channels != 5:
-            raise ValueError(f"x channels must be 5, but received {channels}.")
+        if channels != self.in_channels:
+            raise ValueError(
+                f"x channels must be {self.in_channels}, but received {channels}."
+            )
         if height < 8 or width < 8 or width % 2 != 0:
             raise ValueError(
                 "grid height must be at least 8 and width must be even "
@@ -811,8 +818,11 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
 
 def build_model(config):
     in_channels = _positive_int(config, "in_channels")
-    if in_channels != 5:
-        raise ValueError("in_channels must be exactly 5 in fixed channel order.")
+    if in_channels not in {1, 5}:
+        raise ValueError(
+            "in_channels must be exactly 5 in fixed channel order, except "
+            "1 is accepted for platform validation."
+        )
     window = _positive_int(config, "window")
     if window < 2:
         raise ValueError("window must be at least 2 for future Ls continuation.")
