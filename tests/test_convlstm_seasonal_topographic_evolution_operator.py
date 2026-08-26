@@ -114,6 +114,42 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         outputs.square().mean().backward()
         self.assertTrue(torch.isfinite(inputs.grad).all())
 
+    def test_flat_terrain_produces_finite_zero_shape_descriptors(self):
+        bank = self.module.TerrainGeometryBank()
+        terrain = torch.full((1, 1, 8, 16), 2500.0)
+        features = bank(terrain)
+        self.assertEqual(features.shape, (1, 12, 8, 16))
+        torch.testing.assert_close(features[:, 0], terrain[:, 0] / 10_000.0)
+        torch.testing.assert_close(features[:, 1:], torch.zeros_like(features[:, 1:]))
+        self.assertTrue(torch.isfinite(features).all())
+
+    def test_eastward_ramp_has_signed_east_slope(self):
+        bank = self.module.TerrainGeometryBank()
+        column = torch.linspace(-2000.0, 2000.0, 16)
+        terrain = column.reshape(1, 1, 1, 16).expand(1, 1, 8, 16).clone()
+        features = bank(terrain)
+        self.assertGreater(features[0, 1, 4, 8].item(), 0.0)
+        self.assertAlmostEqual(features[0, 2, 4, 8].item(), 0.0, places=6)
+
+    def test_bowl_has_center_curvature_distinct_from_flat(self):
+        bank = self.module.TerrainGeometryBank()
+        yy, xx = torch.meshgrid(
+            torch.arange(9.0), torch.arange(16.0), indexing="ij"
+        )
+        terrain = ((yy - 4.0) ** 2 + (xx - 8.0) ** 2).reshape(1, 1, 9, 16)
+        features = bank(terrain)
+        self.assertLess(features[0, 6, 4, 8].item(), 0.0)
+
+    def test_edge_builder_creates_twenty_four_relational_neighbors(self):
+        bank = self.module.TerrainGeometryBank()
+        builder = self.module.TerrainEdgeBuilder()
+        terrain = torch.randn(2, 1, 8, 16) * 1000.0
+        geometry = bank(terrain)
+        edges = builder(geometry)
+        self.assertEqual(edges.shape[:2], (2, 24))
+        self.assertEqual(edges.shape[-2:], (8, 16))
+        self.assertEqual(edges.shape[2], builder.edge_dim)
+
 
 if __name__ == "__main__":
     unittest.main()
