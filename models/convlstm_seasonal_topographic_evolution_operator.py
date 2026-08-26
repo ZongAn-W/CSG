@@ -39,6 +39,18 @@ MODEL_SPEC = {
             "min": 0.0,
             "max": 0.9,
         },
+        "operator_mode": {
+            "type": "select",
+            "default": "bilinear",
+            "options": [
+                "fixed",
+                "terrain_only",
+                "ls_only",
+                "separable",
+                "bilinear",
+                "ordinary_conv",
+            ],
+        },
     },
     "auxiliary_inputs": {
         "ls": {
@@ -345,24 +357,80 @@ class FutureLsEncoder(nn.Module):
 
 class SeasonalTerrainWeights(nn.Module):
     NEIGHBOR_COUNT = 24
+    VALID_MODES = ("fixed", "terrain_only", "ls_only", "separable", "bilinear")
 
-    def __init__(self, edge_dim, terrain_hidden_dim, heads):
+    def __init__(self, edge_dim, terrain_hidden_dim, heads, mode="bilinear"):
         super().__init__()
+        if mode not in self.VALID_MODES:
+            raise ValueError(f"unsupported STEO weighting mode: {mode}.")
+        self.mode = mode
         self.heads = heads
-        self.edge_projection = nn.Linear(edge_dim, terrain_hidden_dim)
-        self.season_projection = nn.Linear(8, terrain_hidden_dim)
-        self.output_projection = nn.Linear(terrain_hidden_dim, heads, bias=False)
+        self.terrain_hidden_dim = terrain_hidden_dim
+        self.edge_projection = (
+            nn.Linear(edge_dim, terrain_hidden_dim)
+            if mode in {"terrain_only", "separable", "bilinear"}
+            else None
+        )
+        self.season_projection = (
+            nn.Linear(8, terrain_hidden_dim)
+            if mode in {"ls_only", "separable", "bilinear"}
+            else None
+        )
+        self.output_projection = (
+            nn.Linear(terrain_hidden_dim, heads, bias=False)
+            if mode != "fixed"
+            else None
+        )
+        self.neighbor_embedding = (
+            nn.Parameter(
+                torch.empty(
+                    1,
+                    self.NEIGHBOR_COUNT,
+                    terrain_hidden_dim,
+                    1,
+                    1,
+                )
+            )
+            if mode in {"ls_only", "separable"}
+            else None
+        )
+        if self.neighbor_embedding is not None:
+            nn.init.normal_(self.neighbor_embedding, mean=0.0, std=0.02)
         self.direction_scale_bias = nn.Parameter(
             torch.zeros(1, self.NEIGHBOR_COUNT, heads, 1, 1)
         )
 
     def encode_edges(self, edges):
+        if self.edge_projection is None:
+            return torch.zeros_like(edges[:, :, :1])
         encoded = self.edge_projection(edges.permute(0, 1, 3, 4, 2))
         return encoded.permute(0, 1, 4, 2, 3)
 
     def forward(self, encoded_edges, season_harmonics):
-        season = self.season_projection(season_harmonics)
-        joint = encoded_edges * season[:, None, :, None, None]
+        batch, _, _, height, width = encoded_edges.shape
+        if self.mode == "fixed":
+            logits = self.direction_scale_bias.expand(
+                batch,
+                -1,
+                -1,
+                height,
+                width,
+            )
+            return torch.softmax(logits, dim=1)
+
+        if self.season_projection is not None:
+            season = self.season_projection(season_harmonics)
+            season = season[:, None, :, None, None]
+        if self.mode == "terrain_only":
+            joint = encoded_edges
+        elif self.mode == "ls_only":
+            joint = self.neighbor_embedding * season
+            joint = joint.expand(batch, -1, -1, height, width)
+        elif self.mode == "separable":
+            joint = encoded_edges + self.neighbor_embedding * season
+        else:
+            joint = encoded_edges * season
+
         logits = self.output_projection(joint.permute(0, 1, 3, 4, 2))
         logits = logits.permute(0, 1, 4, 2, 3) + self.direction_scale_bias
         return torch.softmax(logits, dim=1)
@@ -416,7 +484,14 @@ class HistoryEncoder(nn.Module):
 
 
 class STEO(nn.Module):
-    def __init__(self, hidden_dim, edge_dim, terrain_hidden_dim, heads):
+    def __init__(
+        self,
+        hidden_dim,
+        edge_dim,
+        terrain_hidden_dim,
+        heads,
+        operator_mode="bilinear",
+    ):
         super().__init__()
         if hidden_dim % heads != 0:
             raise ValueError("hidden_dim must be divisible by heads.")
@@ -435,6 +510,7 @@ class STEO(nn.Module):
             edge_dim=edge_dim,
             terrain_hidden_dim=terrain_hidden_dim,
             heads=heads,
+            mode=operator_mode,
         )
         self.merge = nn.Conv2d(hidden_dim, hidden_dim, 1, bias=False)
 
@@ -498,6 +574,7 @@ class STEOEvolutionBlock(nn.Module):
         terrain_hidden_dim,
         heads,
         dropout,
+        operator_mode="bilinear",
     ):
         super().__init__()
         self.norm = nn.GroupNorm(1, hidden_dim)
@@ -506,6 +583,7 @@ class STEOEvolutionBlock(nn.Module):
             edge_dim,
             terrain_hidden_dim,
             heads,
+            operator_mode,
         )
         self.pointwise = PointwiseDynamics(
             hidden_dim,
@@ -535,6 +613,39 @@ class STEOEvolutionBlock(nn.Module):
         return state + self.step_projection(spatial + local), weights
 
 
+class OrdinaryEvolutionBlock(nn.Module):
+    def __init__(self, hidden_dim, terrain_hidden_dim, dropout):
+        super().__init__()
+        self.norm = nn.GroupNorm(1, hidden_dim)
+        self.spatial = nn.Sequential(
+            SphericalConv2d(hidden_dim, hidden_dim, 3, bias=True),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+        )
+        self.pointwise = PointwiseDynamics(
+            hidden_dim,
+            terrain_hidden_dim,
+            dropout,
+        )
+        self.step_projection = nn.Conv2d(hidden_dim, hidden_dim, 1)
+
+    def forward(
+        self,
+        state,
+        history_context,
+        encoded_edges,
+        season_harmonics,
+    ):
+        normalized = self.norm(state)
+        spatial = self.spatial(normalized)
+        local = self.pointwise(
+            normalized,
+            history_context,
+            season_harmonics,
+        )
+        return state + self.step_projection(spatial + local), None
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,
@@ -546,28 +657,43 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
         operator_heads,
         evolution_blocks,
         dropout,
+        operator_mode,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.window = window
         self.horizon = horizon
         self.history_hidden_dim = history_hidden_dim
+        self.operator_mode = operator_mode
         self.terrain_bank = TerrainGeometryBank()
         self.edge_builder = TerrainEdgeBuilder()
         self.history_encoder = HistoryEncoder(history_hidden_dim)
         self.ls_encoder = FutureLsEncoder()
-        self.blocks = nn.ModuleList(
-            [
-                STEOEvolutionBlock(
-                    hidden_dim=history_hidden_dim,
-                    edge_dim=self.edge_builder.edge_dim,
-                    terrain_hidden_dim=terrain_hidden_dim,
-                    heads=operator_heads,
-                    dropout=dropout,
-                )
-                for _ in range(evolution_blocks)
-            ]
-        )
+        if operator_mode == "ordinary_conv":
+            self.blocks = nn.ModuleList(
+                [
+                    OrdinaryEvolutionBlock(
+                        history_hidden_dim,
+                        terrain_hidden_dim,
+                        dropout,
+                    )
+                    for _ in range(evolution_blocks)
+                ]
+            )
+        else:
+            self.blocks = nn.ModuleList(
+                [
+                    STEOEvolutionBlock(
+                        hidden_dim=history_hidden_dim,
+                        edge_dim=self.edge_builder.edge_dim,
+                        terrain_hidden_dim=terrain_hidden_dim,
+                        heads=operator_heads,
+                        dropout=dropout,
+                        operator_mode=operator_mode,
+                    )
+                    for _ in range(evolution_blocks)
+                ]
+            )
         self.output_head = nn.Sequential(
             nn.GroupNorm(1, history_hidden_dim),
             nn.Conv2d(history_hidden_dim, history_hidden_dim, 1),
@@ -631,15 +757,24 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
                 "x, topography, and model parameter dtypes must match."
             )
 
+    def _condition_harmonics(self, harmonics):
+        if self.operator_mode in {"fixed", "terrain_only"}:
+            return torch.zeros_like(harmonics)
+        return harmonics
+
     def _forecast(self, x, ls, topography, return_diagnostics):
         self._validate_inputs(x, ls, topography)
         state, history_context = self.history_encoder(x)
         geometry = self.terrain_bank(topography)
         edges = self.edge_builder(geometry)
-        harmonics = self.ls_encoder(ls, self.horizon).to(state.dtype)
-        encoded_edges = [
-            block.operator.encode_edges(edges) for block in self.blocks
-        ]
+        harmonics = self.ls_encoder(ls, self.horizon)
+        harmonics = self._condition_harmonics(harmonics.to(state.dtype))
+        if self.operator_mode == "ordinary_conv":
+            encoded_edges = [None for _ in self.blocks]
+        else:
+            encoded_edges = [
+                block.operator.encode_edges(edges) for block in self.blocks
+            ]
         last_ozone = x[:, -1, 0:1]
         outputs = []
         diagnostic_weights = []
@@ -652,6 +787,11 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
                     block_edges,
                     harmonics[:, lead],
                 )
+                if return_diagnostics and weights is None:
+                    raise ValueError(
+                        "operator diagnostics are unavailable for "
+                        "ordinary_conv mode."
+                    )
                 block_weights.append(weights)
             outputs.append(last_ozone + self.output_head(state))
             if return_diagnostics:
@@ -681,6 +821,17 @@ def build_model(config):
     terrain_hidden_dim = _positive_int(config, "terrain_hidden_dim")
     operator_heads = _positive_int(config, "operator_heads")
     evolution_blocks = _positive_int(config, "evolution_blocks")
+    valid_modes = {
+        "fixed",
+        "terrain_only",
+        "ls_only",
+        "separable",
+        "bilinear",
+        "ordinary_conv",
+    }
+    operator_mode = config["operator_mode"]
+    if operator_mode not in valid_modes:
+        raise ValueError(f"operator_mode must be one of {sorted(valid_modes)}.")
     if history_hidden_dim % operator_heads != 0:
         raise ValueError("history_hidden_dim must be divisible by operator_heads.")
     return SeasonalTopographicEvolutionOperator(
@@ -692,4 +843,5 @@ def build_model(config):
         operator_heads=operator_heads,
         evolution_blocks=evolution_blocks,
         dropout=_dropout(config),
+        operator_mode=operator_mode,
     )

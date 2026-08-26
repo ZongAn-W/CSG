@@ -34,6 +34,7 @@ def model_config(**overrides):
         "operator_heads": 4,
         "evolution_blocks": 2,
         "dropout": 0.1,
+        "operator_mode": "bilinear",
     }
     config.update(overrides)
     return config
@@ -522,6 +523,132 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         )
         self.assertGreater(parameter_count, 0)
         print(f"STEO dry-run trainable parameters: {parameter_count}")
+
+    def test_schema_exposes_exact_operator_ablation_modes(self):
+        parameter = self.module.MODEL_SPEC["parameters"]["operator_mode"]
+        self.assertEqual(parameter["type"], "select")
+        self.assertEqual(parameter["default"], "bilinear")
+        self.assertEqual(
+            parameter["options"],
+            [
+                "fixed",
+                "terrain_only",
+                "ls_only",
+                "separable",
+                "bilinear",
+                "ordinary_conv",
+            ],
+        )
+
+    def test_all_operator_modes_complete_the_same_dry_run(self):
+        x = torch.randn(1, 3, 5, 8, 16)
+        ls = torch.tensor([[20.0, 21.0, 22.0]])
+        topography = torch.randn(1, 1, 8, 16) * 1000.0
+        modes = (
+            "fixed",
+            "terrain_only",
+            "ls_only",
+            "separable",
+            "bilinear",
+            "ordinary_conv",
+        )
+        for mode in modes:
+            with self.subTest(mode=mode):
+                model = self.module.build_model(
+                    model_config(
+                        window=3,
+                        horizon=2,
+                        height=8,
+                        width=16,
+                        history_hidden_dim=8,
+                        terrain_hidden_dim=8,
+                        operator_heads=2,
+                        evolution_blocks=1,
+                        dropout=0.0,
+                        operator_mode=mode,
+                    )
+                ).eval()
+                with torch.no_grad():
+                    output = model(x, ls, topography)
+                self.assertEqual(output.shape, (1, 2, 1, 8, 16))
+                self.assertTrue(torch.isfinite(output).all())
+
+    def test_ablation_dependencies_match_their_names(self):
+        edges_a = torch.randn(1, 24, 43, 4, 8)
+        edges_b = torch.randn(1, 24, 43, 4, 8)
+        season_a = torch.tensor(
+            [[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]]
+        )
+        season_b = torch.tensor(
+            [[1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 1.0]]
+        )
+
+        fixed = self.module.SeasonalTerrainWeights(43, 8, 2, mode="fixed")
+        fixed_a = fixed(fixed.encode_edges(edges_a), season_a)
+        fixed_b = fixed(fixed.encode_edges(edges_b), season_b)
+        torch.testing.assert_close(fixed_a, fixed_b)
+
+        terrain = self.module.SeasonalTerrainWeights(
+            43,
+            8,
+            2,
+            mode="terrain_only",
+        )
+        terrain_a = terrain(terrain.encode_edges(edges_a), season_a)
+        terrain_b = terrain(terrain.encode_edges(edges_a), season_b)
+        torch.testing.assert_close(terrain_a, terrain_b)
+        self.assertGreater(
+            (
+                terrain_a
+                - terrain(terrain.encode_edges(edges_b), season_a)
+            ).abs().max().item(),
+            1e-7,
+        )
+
+        ls_only = self.module.SeasonalTerrainWeights(
+            43,
+            8,
+            2,
+            mode="ls_only",
+        )
+        ls_edges_a = ls_only.encode_edges(edges_a)
+        ls_edges_b = ls_only.encode_edges(edges_b)
+        torch.testing.assert_close(
+            ls_only(ls_edges_a, season_a),
+            ls_only(ls_edges_b, season_a),
+        )
+        self.assertGreater(
+            (
+                ls_only(ls_edges_a, season_a)
+                - ls_only(ls_edges_a, season_b)
+            ).abs().max().item(),
+            1e-7,
+        )
+
+    def test_ordinary_ablation_uses_spatial_convolution_block(self):
+        model = self.module.build_model(model_config(operator_mode="ordinary_conv"))
+        self.assertIsInstance(
+            model.blocks[0],
+            self.module.OrdinaryEvolutionBlock,
+        )
+
+    def test_nonseasonal_modes_zero_the_future_season_context(self):
+        harmonics = torch.randn(2, 3, 8)
+        for mode in ("fixed", "terrain_only"):
+            model = self.module.build_model(model_config(operator_mode=mode))
+            conditioned = model._condition_harmonics(harmonics)
+            torch.testing.assert_close(conditioned, torch.zeros_like(harmonics))
+        for mode in (
+            "ls_only",
+            "separable",
+            "bilinear",
+            "ordinary_conv",
+        ):
+            model = self.module.build_model(model_config(operator_mode=mode))
+            torch.testing.assert_close(
+                model._condition_harmonics(harmonics),
+                harmonics,
+            )
 
 
 if __name__ == "__main__":
