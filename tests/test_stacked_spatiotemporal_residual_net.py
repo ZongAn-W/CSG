@@ -92,6 +92,18 @@ class StackedSpatiotemporalResidualNetTests(unittest.TestCase):
         outputs = block(torch.randn(2, 3, 4, 7, 9))
         self.assertEqual(tuple(outputs.shape), (2, 3, 4, 7, 9))
 
+    def test_spatial_encoder_downsamples_by_two(self):
+        encoder = self.module.SpatialEncoder(2, 4)
+
+        self.assertEqual(encoder.layers[0].stride, (2, 2))
+        self.assertEqual(tuple(encoder(torch.randn(1, 2, 9, 15)).shape), (1, 4, 5, 8))
+
+    def test_spatial_decoder_restores_requested_size(self):
+        decoder = self.module.SpatialDecoder(4)
+
+        outputs = decoder(torch.randn(1, 4, 5, 8), output_size=(9, 15))
+        self.assertEqual(tuple(outputs.shape), (1, 1, 9, 15))
+
     def test_zero_updates_preserve_block_input(self):
         block = self.module.SpatiotemporalResidualBlock(
             window=3, hidden_dim=4, spatial_dim=8, dropout=0.0
@@ -107,6 +119,8 @@ class StackedSpatiotemporalResidualNetTests(unittest.TestCase):
     def test_matches_platform_dry_run_shape(self):
         model = self.module.build_model(model_config()).eval()
         self.assertEqual(len(model.blocks), 3)
+        self.assertEqual(model.spatial_encoder.layers[0].stride, (2, 2))
+        self.assertIsInstance(model.spatial_decoder, self.module.SpatialDecoder)
         with torch.no_grad():
             outputs = model(torch.randn(2, 3, 1, 8, 16))
 

@@ -5,7 +5,8 @@ from torch import nn
 MODEL_SPEC = {
     "name": "StackedSpatiotemporalResidualNet",
     "description": (
-        "Stacked two-layer ConvLSTM and full multiscale spatial residual blocks."
+        "Latent-resolution encoder-decoder with stacked two-layer ConvLSTM "
+        "and full multiscale spatial residual blocks."
     ),
     "parameters": {
         "hidden_dim": {
@@ -34,6 +35,53 @@ MODEL_SPEC = {
         },
     },
 }
+
+
+class SpatialEncoder(nn.Module):
+    def __init__(self, in_channels, hidden_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                hidden_dim,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            ),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class SpatialDecoder(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.ConvTranspose2d(
+                hidden_dim,
+                hidden_dim,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+            ),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, 1, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x, output_size):
+        x = self.layers(x)
+        if x.shape[-2:] != output_size:
+            x = torch.nn.functional.interpolate(
+                x,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x
 
 
 class ConvLSTMCell(nn.Module):
@@ -169,10 +217,8 @@ class StackedSpatiotemporalResidualNet(nn.Module):
         self.horizon = horizon
         self.hidden_dim = hidden_dim
 
-        self.input_projection = nn.Conv2d(
-            in_channels, hidden_dim, kernel_size=3, padding=1
-        )
-        self.input_activation = nn.GELU()
+        self.spatial_encoder = SpatialEncoder(in_channels, hidden_dim)
+        self.spatial_decoder = SpatialDecoder(hidden_dim)
         self.blocks = nn.Sequential(
             *[
                 SpatiotemporalResidualBlock(
@@ -188,9 +234,6 @@ class StackedSpatiotemporalResidualNet(nn.Module):
             window * hidden_dim,
             horizon * hidden_dim,
             kernel_size=1,
-        )
-        self.output_projection = nn.Conv2d(
-            hidden_dim, 1, kernel_size=3, padding=1
         )
 
     def forward(self, x):
@@ -209,20 +252,31 @@ class StackedSpatiotemporalResidualNet(nn.Module):
                 f"Expected {self.in_channels} input channels, but received {channels}."
             )
 
-        encoded = self.input_projection(
+        encoded = self.spatial_encoder(
             x.reshape(batch * window, channels, height, width)
         )
-        encoded = self.input_activation(encoded).reshape(
-            batch, window, self.hidden_dim, height, width
+        latent_height, latent_width = encoded.shape[-2:]
+        encoded = encoded.reshape(
+            batch, window, self.hidden_dim, latent_height, latent_width
         )
         encoded = self.blocks(encoded)
         forecast = self.time_projection(
-            encoded.reshape(batch, window * self.hidden_dim, height, width)
+            encoded.reshape(
+                batch,
+                window * self.hidden_dim,
+                latent_height,
+                latent_width,
+            )
         )
         forecast = forecast.reshape(
-            batch * self.horizon, self.hidden_dim, height, width
+            batch * self.horizon,
+            self.hidden_dim,
+            latent_height,
+            latent_width,
         )
-        prediction = self.output_projection(forecast)
+        prediction = self.spatial_decoder(
+            forecast, output_size=(height, width)
+        )
         return prediction.reshape(batch, self.horizon, 1, height, width)
 
 
