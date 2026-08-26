@@ -230,6 +230,63 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
                 0.0,
             )
 
+    def test_steo_returns_state_shape_and_normalized_weights(self):
+        operator = self.module.STEO(
+            hidden_dim=16,
+            edge_dim=43,
+            terrain_hidden_dim=8,
+            heads=4,
+        )
+        state = torch.randn(2, 16, 8, 16)
+        edges = torch.randn(2, 24, 43, 8, 16)
+        season = torch.randn(2, 8)
+        encoded_edges = operator.encode_edges(edges)
+        update, weights = operator(state, encoded_edges, season)
+        self.assertEqual(update.shape, state.shape)
+        self.assertEqual(weights.shape, (2, 24, 4, 8, 16))
+        torch.testing.assert_close(
+            weights.sum(dim=1),
+            torch.ones(2, 4, 8, 16),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    def test_steo_constant_state_has_exact_zero_difference_update(self):
+        operator = self.module.STEO(
+            hidden_dim=16,
+            edge_dim=43,
+            terrain_hidden_dim=8,
+            heads=4,
+        ).eval()
+        state = torch.full((2, 16, 8, 16), 3.25)
+        edges = torch.randn(2, 24, 43, 8, 16)
+        season = torch.randn(2, 8)
+        encoded_edges = operator.encode_edges(edges)
+        update, _ = operator(state, encoded_edges, season)
+        torch.testing.assert_close(
+            update,
+            torch.zeros_like(update),
+            atol=0.0,
+            rtol=0.0,
+        )
+
+    def test_steo_backpropagates_to_state_edges_and_all_parameters(self):
+        operator = self.module.STEO(
+            hidden_dim=16,
+            edge_dim=43,
+            terrain_hidden_dim=8,
+            heads=4,
+        )
+        state = torch.randn(2, 16, 8, 16, requires_grad=True)
+        edges = torch.randn(2, 24, 43, 8, 16, requires_grad=True)
+        encoded_edges = operator.encode_edges(edges)
+        update, weights = operator(state, encoded_edges, torch.randn(2, 8))
+        (update.square().mean() + weights.square().mean()).backward()
+        self.assertTrue(torch.isfinite(state.grad).all())
+        self.assertTrue(torch.isfinite(edges.grad).all())
+        for name, parameter in operator.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+
 
 if __name__ == "__main__":
     unittest.main()

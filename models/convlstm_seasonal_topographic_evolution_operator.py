@@ -415,6 +415,52 @@ class HistoryEncoder(nn.Module):
         return hidden, cell
 
 
+class STEO(nn.Module):
+    def __init__(self, hidden_dim, edge_dim, terrain_hidden_dim, heads):
+        super().__init__()
+        if hidden_dim % heads != 0:
+            raise ValueError("hidden_dim must be divisible by heads.")
+        self.hidden_dim = hidden_dim
+        self.heads = heads
+        self.head_dim = hidden_dim // heads
+        self.grid = SphericalGrid()
+        self.offsets = TerrainEdgeBuilder().offsets
+        self.message_projection = nn.Conv2d(
+            hidden_dim,
+            hidden_dim,
+            1,
+            bias=True,
+        )
+        self.weight_network = SeasonalTerrainWeights(
+            edge_dim=edge_dim,
+            terrain_hidden_dim=terrain_hidden_dim,
+            heads=heads,
+        )
+        self.merge = nn.Conv2d(hidden_dim, hidden_dim, 1, bias=False)
+
+    def encode_edges(self, edge_features):
+        return self.weight_network.encode_edges(edge_features)
+
+    def forward(self, state, encoded_edges, season_harmonics):
+        batch, _, height, width = state.shape
+        projected = self.message_projection(state).reshape(
+            batch,
+            self.heads,
+            self.head_dim,
+            height,
+            width,
+        )
+        differences = []
+        for dy, dx, _, _, _ in self.offsets:
+            neighbor = self.grid.neighbor(projected, dy, dx)
+            differences.append(neighbor - projected)
+        differences = torch.stack(differences, dim=1)
+        weights = self.weight_network(encoded_edges, season_harmonics)
+        message = (differences * weights.unsqueeze(3)).sum(dim=1)
+        message = message.reshape(batch, self.hidden_dim, height, width)
+        return self.merge(message), weights
+
+
 class SeasonalTopographicEvolutionOperator(nn.Module):
     def __init__(
         self,
