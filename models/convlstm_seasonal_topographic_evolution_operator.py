@@ -575,7 +575,64 @@ class SeasonalTopographicEvolutionOperator(nn.Module):
             nn.Conv2d(history_hidden_dim, 1, 1),
         )
 
+    def _validate_inputs(self, x, ls, topography):
+        if not isinstance(x, torch.Tensor) or x.ndim != 5:
+            raise ValueError(
+                "x must have shape [batch, window, 5, height, width]."
+            )
+        parameter = next(self.parameters())
+        if x.device != parameter.device:
+            raise ValueError("x and model parameter device must match.")
+        if not torch.is_floating_point(x) or x.dtype != parameter.dtype:
+            raise ValueError(
+                "x and model parameters must use the same floating dtype."
+            )
+        if not torch.isfinite(x).all():
+            raise ValueError("x must contain finite floating-point values.")
+
+        batch, window, channels, height, width = x.shape
+        if window != self.window:
+            raise ValueError(
+                f"x window must be {self.window}, but received {window}."
+            )
+        if channels != 5:
+            raise ValueError(f"x channels must be 5, but received {channels}.")
+        if height < 8 or width < 8 or width % 2 != 0:
+            raise ValueError(
+                "grid height must be at least 8 and width must be even "
+                "and at least 8."
+            )
+
+        if not isinstance(ls, torch.Tensor) or tuple(ls.shape) != (batch, window):
+            raise ValueError(f"ls shape must be ({batch}, {window}).")
+        if not torch.is_floating_point(ls):
+            raise ValueError("ls must contain floating-point values.")
+        if ls.device != x.device:
+            raise ValueError("x and ls device must match.")
+        if not torch.isfinite(ls).all():
+            raise ValueError("ls must contain finite floating-point values.")
+
+        expected_topography = (batch, 1, height, width)
+        if (
+            not isinstance(topography, torch.Tensor)
+            or tuple(topography.shape) != expected_topography
+        ):
+            raise ValueError(
+                f"topography shape must be {expected_topography}."
+            )
+        if topography.dtype != torch.float32:
+            raise ValueError("topography must contain float32 values.")
+        if topography.device != x.device:
+            raise ValueError("x and topography device must match.")
+        if not torch.isfinite(topography).all():
+            raise ValueError("topography must contain finite float32 values.")
+        if topography.dtype != parameter.dtype:
+            raise ValueError(
+                "x, topography, and model parameter dtypes must match."
+            )
+
     def _forecast(self, x, ls, topography, return_diagnostics):
+        self._validate_inputs(x, ls, topography)
         state, history_context = self.history_encoder(x)
         geometry = self.terrain_bank(topography)
         edges = self.edge_builder(geometry)

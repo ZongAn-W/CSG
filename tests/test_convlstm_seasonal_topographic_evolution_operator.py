@@ -343,6 +343,186 @@ class SeasonalTopographicEvolutionOperatorTests(unittest.TestCase):
         self.assertEqual(output.shape, (1, 2, 1, 8, 16))
         self.assertEqual(weights.shape, (1, 2, 1, 24, 2, 8, 16))
 
+    def test_rejects_invalid_runtime_inputs(self):
+        model = self.module.build_model(
+            model_config(
+                window=3,
+                horizon=2,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+            )
+        )
+        x = torch.randn(2, 3, 5, 8, 16)
+        ls = torch.zeros(2, 3)
+        topography = torch.zeros(2, 1, 8, 16)
+        cases = [
+            ("x", lambda: model(torch.randn(2, 3, 5, 8), ls, topography)),
+            (
+                "window",
+                lambda: model(
+                    torch.randn(2, 2, 5, 8, 16),
+                    ls[:, :2],
+                    topography,
+                ),
+            ),
+            (
+                "channels",
+                lambda: model(torch.randn(2, 3, 4, 8, 16), ls, topography),
+            ),
+            (
+                "finite",
+                lambda: model(torch.full_like(x, float("nan")), ls, topography),
+            ),
+            (
+                "grid",
+                lambda: model(
+                    torch.randn(2, 3, 5, 7, 16),
+                    ls,
+                    torch.zeros(2, 1, 7, 16),
+                ),
+            ),
+            (
+                "grid",
+                lambda: model(
+                    torch.randn(2, 3, 5, 8, 15),
+                    ls,
+                    torch.zeros(2, 1, 8, 15),
+                ),
+            ),
+            ("ls", lambda: model(x, torch.zeros(2, 2), topography)),
+            (
+                "ls",
+                lambda: model(x, torch.zeros(2, 3, dtype=torch.long), topography),
+            ),
+            (
+                "ls",
+                lambda: model(x, torch.full((2, 3), float("inf")), topography),
+            ),
+            (
+                "device",
+                lambda: model(x, torch.empty(2, 3, device="meta"), topography),
+            ),
+            ("topography", lambda: model(x, ls, torch.zeros(2, 8, 16))),
+            ("float32", lambda: model(x, ls, topography.double())),
+            (
+                "topography",
+                lambda: model(
+                    x,
+                    ls,
+                    torch.full_like(topography, float("nan")),
+                ),
+            ),
+            (
+                "device",
+                lambda: model(
+                    x,
+                    ls,
+                    torch.empty(2, 1, 8, 16, device="meta"),
+                ),
+            ),
+        ]
+        for label, call in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, label):
+                    call()
+
+    def test_rejects_invalid_configuration(self):
+        invalid = [
+            ({"window": 1}, "window"),
+            ({"history_hidden_dim": 0}, "positive integer"),
+            ({"terrain_hidden_dim": 0}, "positive integer"),
+            ({"operator_heads": 0}, "positive integer"),
+            ({"evolution_blocks": 0}, "positive integer"),
+            ({"history_hidden_dim": 10, "operator_heads": 4}, "divisible"),
+            ({"dropout": 1.0}, "dropout"),
+            ({"dropout": -0.1}, "dropout"),
+        ]
+        for overrides, message in invalid:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.module.build_model(model_config(**overrides))
+
+    def test_uses_only_upload_safe_imports_and_calls(self):
+        tree = ast.parse(MODEL_PATH.read_text(encoding="utf-8"))
+        import_roots = set()
+        called_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                import_roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                import_roots.add(node.module.split(".")[0])
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    called_names.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    called_names.add(node.func.attr)
+        banned = {
+            "open",
+            "eval",
+            "exec",
+            "compile",
+            "__import__",
+            "system",
+            "popen",
+            "Popen",
+            "run",
+        }
+        self.assertLessEqual(import_roots, {"torch"})
+        self.assertFalse(called_names & banned)
+
+    def test_future_non_operator_modules_are_pointwise(self):
+        model = self.module.build_model(model_config())
+        for block_index, block in enumerate(model.blocks):
+            for branch_name in ("pointwise", "step_projection"):
+                branch = getattr(block, branch_name)
+                for module in branch.modules():
+                    if isinstance(module, nn.Conv2d):
+                        self.assertEqual(
+                            module.kernel_size,
+                            (1, 1),
+                            f"block {block_index} {branch_name}",
+                        )
+        for module in model.output_head.modules():
+            if isinstance(module, nn.Conv2d):
+                self.assertEqual(module.kernel_size, (1, 1))
+
+    def test_model_has_no_trainable_per_pixel_parameters(self):
+        model = self.module.build_model(model_config())
+        forbidden_spatial_shapes = {(36, 72), (1, 36, 72)}
+        for name, parameter in model.named_parameters():
+            self.assertNotIn(tuple(parameter.shape), forbidden_spatial_shapes, name)
+            self.assertNotEqual(tuple(parameter.shape[-2:]), (36, 72), name)
+
+    def test_eval_is_deterministic_and_reports_parameter_count(self):
+        model = self.module.build_model(
+            model_config(
+                window=3,
+                horizon=2,
+                height=8,
+                width=16,
+                history_hidden_dim=8,
+                terrain_hidden_dim=8,
+                operator_heads=2,
+                evolution_blocks=1,
+            )
+        ).eval()
+        x = torch.randn(1, 3, 5, 8, 16)
+        ls = torch.tensor([[10.0, 11.0, 12.0]])
+        topography = torch.randn(1, 1, 8, 16) * 1000.0
+        with torch.no_grad():
+            first = model(x, ls, topography)
+            second = model(x, ls, topography)
+        torch.testing.assert_close(first, second, atol=0.0, rtol=0.0)
+        parameter_count = sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        self.assertGreater(parameter_count, 0)
+        print(f"STEO dry-run trainable parameters: {parameter_count}")
+
 
 if __name__ == "__main__":
     unittest.main()
