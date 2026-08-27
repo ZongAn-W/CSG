@@ -5,8 +5,9 @@ from torch import nn
 MODEL_SPEC = {
     "name": "StackedSpatiotemporalResidualNet",
     "description": (
-        "Latent-resolution encoder-decoder with stacked two-layer ConvLSTM "
-        "and full multiscale spatial residual blocks."
+        "Latent-resolution encoder-decoder with stacked two-layer ConvLSTM, "
+        "depthwise-separable multiscale residual blocks, and high-resolution "
+        "skip fusion."
     ),
     "parameters": {
         "hidden_dim": {
@@ -40,6 +41,10 @@ MODEL_SPEC = {
 class SpatialEncoder(nn.Module):
     def __init__(self, in_channels, hidden_dim):
         super().__init__()
+        self.skip_projection = nn.Conv2d(
+            in_channels, hidden_dim, kernel_size=3, padding=1
+        )
+        self.skip_activation = nn.GELU()
         self.layers = nn.Sequential(
             nn.Conv2d(
                 in_channels,
@@ -56,6 +61,10 @@ class SpatialEncoder(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+    def forward_with_skip(self, x):
+        skip = self.skip_activation(self.skip_projection(x))
+        return self.layers(x), skip
+
 
 class SpatialDecoder(nn.Module):
     def __init__(self, hidden_dim):
@@ -69,10 +78,15 @@ class SpatialDecoder(nn.Module):
                 padding=1,
             ),
             nn.GELU(),
-            nn.Conv2d(hidden_dim, 1, kernel_size=3, padding=1),
         )
+        self.skip_projection = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
+        self.fusion = nn.Conv2d(
+            2 * hidden_dim, hidden_dim, kernel_size=3, padding=1
+        )
+        self.activation = nn.GELU()
+        self.output_projection = nn.Conv2d(hidden_dim, 1, kernel_size=3, padding=1)
 
-    def forward(self, x, output_size):
+    def forward(self, x, output_size, skip=None):
         x = self.layers(x)
         if x.shape[-2:] != output_size:
             x = torch.nn.functional.interpolate(
@@ -81,7 +95,39 @@ class SpatialDecoder(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-        return x
+        if skip is None:
+            skip = torch.zeros_like(x)
+        else:
+            if skip.shape[-2:] != output_size:
+                skip = torch.nn.functional.interpolate(
+                    skip,
+                    size=output_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            skip = self.skip_projection(skip)
+        x = self.activation(self.fusion(torch.cat((x, skip), dim=1)))
+        return self.output_projection(x)
+
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, channels, kernel_size):
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=channels,
+        )
+        self.pointwise = nn.Conv2d(channels, channels, kernel_size=1)
+
+        # Keep branch inspection compatible with the former Conv2d surface.
+        self.kernel_size = self.depthwise.kernel_size
+        self.groups = 1
+
+    def forward(self, x):
+        return self.pointwise(self.depthwise(x))
 
 
 class ConvLSTMCell(nn.Module):
@@ -94,6 +140,9 @@ class ConvLSTMCell(nn.Module):
             kernel_size=3,
             padding=1,
         )
+        with torch.no_grad():
+            self.gates.bias.zero_()
+            self.gates.bias[hidden_dim : 2 * hidden_dim].fill_(1.0)
 
     def forward(self, x, hidden, cell):
         input_gate, forget_gate, output_gate, candidate = self.gates(
@@ -155,17 +204,14 @@ class SpatiotemporalResidualBlock(nn.Module):
         self.input_projection = nn.Conv2d(
             flattened_channels, spatial_dim, kernel_size=1
         )
-        self.branch_3x3 = nn.Conv2d(
-            spatial_dim, spatial_dim, kernel_size=3, padding=1
-        )
-        self.branch_5x5 = nn.Conv2d(
-            spatial_dim, spatial_dim, kernel_size=5, padding=2
-        )
-        self.branch_7x7 = nn.Conv2d(
-            spatial_dim, spatial_dim, kernel_size=7, padding=3
-        )
+        self.branch_3x3 = DepthwiseSeparableConv(spatial_dim, kernel_size=3)
+        self.branch_5x5 = DepthwiseSeparableConv(spatial_dim, kernel_size=5)
+        self.branch_7x7 = DepthwiseSeparableConv(spatial_dim, kernel_size=7)
         self.fusion = nn.Conv2d(3 * spatial_dim, spatial_dim, kernel_size=1)
-        self.norm = nn.GroupNorm(1, spatial_dim)
+        num_groups = min(8, spatial_dim)
+        while spatial_dim % num_groups != 0:
+            num_groups -= 1
+        self.norm = nn.GroupNorm(num_groups, spatial_dim)
         self.dropout = nn.Dropout2d(dropout)
         self.activation = nn.GELU()
         self.output_projection = nn.Conv2d(
@@ -235,6 +281,11 @@ class StackedSpatiotemporalResidualNet(nn.Module):
             horizon * hidden_dim,
             kernel_size=1,
         )
+        self.skip_projection = nn.Conv2d(
+            window * hidden_dim,
+            horizon * hidden_dim,
+            kernel_size=1,
+        )
 
     def forward(self, x):
         if x.ndim != 5:
@@ -252,7 +303,7 @@ class StackedSpatiotemporalResidualNet(nn.Module):
                 f"Expected {self.in_channels} input channels, but received {channels}."
             )
 
-        encoded = self.spatial_encoder(
+        encoded, skip = self.spatial_encoder.forward_with_skip(
             x.reshape(batch * window, channels, height, width)
         )
         latent_height, latent_width = encoded.shape[-2:]
@@ -274,8 +325,17 @@ class StackedSpatiotemporalResidualNet(nn.Module):
             latent_height,
             latent_width,
         )
+        skip = self.skip_projection(
+            skip.reshape(batch, window * self.hidden_dim, height, width)
+        )
+        skip = skip.reshape(
+            batch * self.horizon,
+            self.hidden_dim,
+            height,
+            width,
+        )
         prediction = self.spatial_decoder(
-            forecast, output_size=(height, width)
+            forecast, output_size=(height, width), skip=skip
         )
         return prediction.reshape(batch, self.horizon, 1, height, width)
 
@@ -287,19 +347,29 @@ def _positive_int(config, key):
     return value
 
 
+def _bounded_int(config, key):
+    value = _positive_int(config, key)
+    metadata = MODEL_SPEC["parameters"][key]
+    if not metadata["min"] <= value <= metadata["max"]:
+        raise ValueError(
+            f"{key} must be in the range [{metadata['min']}, {metadata['max']}]."
+        )
+    return value
+
+
 def build_model(config):
     in_channels = _positive_int(config, "in_channels")
     window = _positive_int(config, "window")
     horizon = _positive_int(config, "horizon")
-    hidden_dim = _positive_int(config, "hidden_dim")
-    spatial_dim = _positive_int(config, "spatial_dim")
-    num_blocks = _positive_int(config, "num_blocks")
+    hidden_dim = _bounded_int(config, "hidden_dim")
+    spatial_dim = _bounded_int(config, "spatial_dim")
+    num_blocks = _bounded_int(config, "num_blocks")
     dropout = config["dropout"]
 
     if isinstance(dropout, bool) or not isinstance(dropout, (int, float)):
         raise ValueError("dropout must be a number in the range [0, 1).")
-    if not 0.0 <= dropout < 1.0:
-        raise ValueError("dropout must be a number in the range [0, 1).")
+    if not 0.0 <= dropout <= MODEL_SPEC["parameters"]["dropout"]["max"]:
+        raise ValueError("dropout must be a number in the range [0, 0.9].")
 
     return StackedSpatiotemporalResidualNet(
         in_channels=in_channels,

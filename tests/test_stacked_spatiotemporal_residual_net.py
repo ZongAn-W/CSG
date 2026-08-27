@@ -92,17 +92,52 @@ class StackedSpatiotemporalResidualNetTests(unittest.TestCase):
         outputs = block(torch.randn(2, 3, 4, 7, 9))
         self.assertEqual(tuple(outputs.shape), (2, 3, 4, 7, 9))
 
+    def test_multiscale_branches_are_depthwise_separable(self):
+        block = self.module.SpatiotemporalResidualBlock(
+            window=3, hidden_dim=4, spatial_dim=8, dropout=0.0
+        )
+
+        for branch in (block.branch_3x3, block.branch_5x5, block.branch_7x7):
+            self.assertEqual(branch.depthwise.groups, 8)
+            self.assertEqual(branch.pointwise.kernel_size, (1, 1))
+
+    def test_forget_gate_bias_starts_positive(self):
+        cell = self.module.ConvLSTMCell(in_channels=4, hidden_dim=4)
+
+        forget_bias = cell.gates.bias.detach()[4:8]
+        self.assertTrue(torch.all(forget_bias > 0))
+
+    def test_block_uses_channel_groups_for_normalization(self):
+        block = self.module.SpatiotemporalResidualBlock(
+            window=3, hidden_dim=4, spatial_dim=8, dropout=0.0
+        )
+
+        self.assertGreater(block.norm.num_groups, 1)
+
     def test_spatial_encoder_downsamples_by_two(self):
         encoder = self.module.SpatialEncoder(2, 4)
 
         self.assertEqual(encoder.layers[0].stride, (2, 2))
         self.assertEqual(tuple(encoder(torch.randn(1, 2, 9, 15)).shape), (1, 4, 5, 8))
 
+    def test_spatial_encoder_exposes_high_resolution_skip(self):
+        encoder = self.module.SpatialEncoder(2, 4)
+
+        latent, skip = encoder.forward_with_skip(torch.randn(1, 2, 9, 15))
+        self.assertEqual(tuple(latent.shape), (1, 4, 5, 8))
+        self.assertEqual(tuple(skip.shape), (1, 4, 9, 15))
+
     def test_spatial_decoder_restores_requested_size(self):
         decoder = self.module.SpatialDecoder(4)
 
         outputs = decoder(torch.randn(1, 4, 5, 8), output_size=(9, 15))
         self.assertEqual(tuple(outputs.shape), (1, 1, 9, 15))
+
+        skip = torch.randn(1, 4, 9, 15)
+        fused_outputs = decoder(
+            torch.randn(1, 4, 5, 8), output_size=(9, 15), skip=skip
+        )
+        self.assertEqual(tuple(fused_outputs.shape), (1, 1, 9, 15))
 
     def test_zero_updates_preserve_block_input(self):
         block = self.module.SpatiotemporalResidualBlock(
@@ -156,8 +191,16 @@ class StackedSpatiotemporalResidualNetTests(unittest.TestCase):
             self.module.build_model(model_config(num_blocks=0))
         with self.assertRaisesRegex(ValueError, "positive integer"):
             self.module.build_model(model_config(hidden_dim=True))
+        with self.assertRaisesRegex(ValueError, "range"):
+            self.module.build_model(model_config(hidden_dim=3))
+        with self.assertRaisesRegex(ValueError, "range"):
+            self.module.build_model(model_config(spatial_dim=7))
+        with self.assertRaisesRegex(ValueError, "range"):
+            self.module.build_model(model_config(num_blocks=9))
         with self.assertRaisesRegex(ValueError, "dropout"):
             self.module.build_model(model_config(dropout=1.0))
+        with self.assertRaisesRegex(ValueError, "range"):
+            self.module.build_model(model_config(dropout=0.95))
 
         model = self.module.build_model(model_config())
         with self.assertRaisesRegex(ValueError, "shape"):

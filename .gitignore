@@ -1,24 +1,24 @@
-# Python bytecode and caches
+# Python bytecode, test, type-check, and notebook caches
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.ipynb_checkpoints/
-
-# Coverage and build artifacts
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/
+.ipynb_checkpoints/
+
+# Python packages and virtual environments
 build/
 dist/
 *.egg-info/
-
-# Virtual environments
 .venv/
 venv/
 env/
+ENV/
 
 # Local configuration and secrets
 .env
@@ -32,16 +32,25 @@ env/
 Thumbs.db
 Desktop.ini
 
-# Logs
+# Logs and local Codex/Superpowers state
 *.log
+.superpowers/
 
-# Local datasets
+# Large local data and generated artifacts
 /dataset/
-
-# Generated model, checkpoint, and experiment outputs
-/models/
+/output/
+/tmp/
+/reports/qa_*/
 /runs/
 /checkpoints/
+/wandb/
+/lightning_logs/
+/tensorboard/
 *.pt
 *.pth
 *.ckpt
+*.onnx
+
+# Generated documents
+*.pdf
+*.docx
